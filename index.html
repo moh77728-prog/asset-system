@@ -72,7 +72,7 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 
 <script>
 /* الصق هنا رابط Apps Script المنشور (ينتهي بـ /exec) بين علامتي الاقتباس */
-const API_URL = 'PASTE_APPS_SCRIPT_URL_HERE';
+const API_URL = 'https://script.google.com/macros/s/AKfycbxADQOlh3G90s6mgoHq-Wd5HW3cwnboR9s6avWBKuI_g0WO_Sj9uNEJyJAe7y9TexKBZA/exec';
 const INITIAL_ID = (new URLSearchParams(location.search).get('id') || '').replace(/[^A-Za-z0-9\-]/g, '').slice(0, 60);
 const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] } };
 const views = {};
