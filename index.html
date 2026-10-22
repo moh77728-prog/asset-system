@@ -251,7 +251,7 @@ views.rooms = function () {
   h += '<details><summary>إضافة طابق</summary><label>رمز الطابق (إنجليزي أو أرقام)</label><input id="nfc" dir="ltr" maxlength="4"><label>اسم الطابق</label><input id="nfn">' +
     '<div style="height:10px"></div><button class="btn primary" onclick="addFloor()">حفظ الطابق</button></details>';
   h += '<details><summary>إضافة غرفة</summary><label>الطابق</label><select id="nrf">' + opts(b.floors, '', function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
-    '<label>رمز باب الغرفة (إنجليزي أو أرقام)</label><input id="nrc" dir="ltr" maxlength="8"><label>اسم الغرفة</label><input id="nrn">' +
+    '<label>رمز باب الغرفة (إنجليزي أو أرقام)</label><input id="nrc" dir="ltr" maxlength="12"><label>اسم الغرفة</label><input id="nrn">' +
     '<div style="height:10px"></div><button class="btn primary" onclick="addRoom()">حفظ الغرفة</button></details>';
   page('الغرف والأصول', h);
 };
@@ -285,7 +285,7 @@ views.room = async function (p) {
 
 /* ---------- إضافة أصل ---------- */
 const ADD = { kind: 'جهاز', floor: '', room: '', type: '', maker: '', model: '', status: 'سليم', qty: '1', notes: '', serial: '', n: 0, viaScan: false, found: null };
-function cleanDoor(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8); }
+function cleanDoor(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12); }
 function roomByCode(c) {
   c = cleanDoor(c);
   return c ? S.boot.rooms.find(function (r) { return r.code === c; }) : null;
@@ -519,9 +519,20 @@ function renderAsset(a) {
   const hist = (a.moves || []).map(function (m) {
     return '<div class="kv"><span>' + esc(m.time) + '</span><span style="text-align:left">' + esc(m.action) + ' — ' + esc(m.user) + (m.note ? '<br><small>' + esc(m.note) + '</small>' : '') + '</span></div>';
   }).join('');
+  const role = (S.user && S.user.role) || '', canAssign = role !== 'قراءة', canTransfer = role === 'مدير' || a.holder === (S.user && S.user.name);
+  let assign = '';
+  if (canAssign && (!a.holder || canTransfer)) {
+    const names = (b.people || []).filter(function (n) { return n !== a.holder; });
+    assign = '<div style="margin-top:12px;border-top:1px solid var(--bd);padding-top:8px"><b>' + (a.holder ? 'نقل العهدة لشخص آخر' : 'إسناد العهدة لشخص آخر') + '</b>' +
+      '<label>الشخص</label><select id="hp" onchange="$(\'#hpn\').style.display=this.value===\'__new__\'?\'block\':\'none\'"><option value="">— اختر —</option>' + opts(names) + '<option value="__new__">+ شخص جديد</option></select>' +
+      '<div id="hpn" style="display:none"><label>اسم الشخص الجديد</label><input id="hpName"></div><div style="height:8px"></div>' +
+      '<button class="btn primary" onclick="assignTo()">' + (a.holder ? 'نقل العهدة' : 'إسناد العهدة') + '</button></div>';
+  } else if (a.holder && canAssign) {
+    assign = '<p class="mut" style="margin:10px 0 0">نقل عهدة الغير للمدير فقط</p>';
+  }
   const holderBox = a.holder
-    ? '<div class="kv"><span>العهدة الحالية</span><b>' + esc(a.holder) + '</b></div><label>ملاحظة الإرجاع (اختياري)</label><input id="hn"><div style="height:8px"></div><button class="btn" onclick="act(\'إرجاع\',{note:$(\'#hn\').value})">إرجاع العهدة</button>'
-    : '<div class="kv"><span>العهدة الحالية</span><span>غير مسحوب</span></div><label>ملاحظة السحب (اختياري)</label><input id="hn"><div style="height:8px"></div><button class="btn primary" onclick="act(\'سحب\',{note:$(\'#hn\').value})">سحب عهدة باسمي</button>';
+    ? '<div class="kv"><span>العهدة الحالية</span><b>' + esc(a.holder) + '</b></div><label>ملاحظة (اختياري)</label><input id="hn"><div style="height:8px"></div><button class="btn" onclick="act(\'إرجاع\',{note:$(\'#hn\').value})">إرجاع العهدة</button>' + assign
+    : '<div class="kv"><span>العهدة الحالية</span><span>غير مسحوب</span></div><label>ملاحظة (اختياري)</label><input id="hn"><div style="height:8px"></div><button class="btn primary" onclick="act(\'سحب\',{note:$(\'#hn\').value})">سحب عهدة باسمي</button>' + assign;
   page('بطاقة الأصل',
     '<div class="card"><div class="row" style="align-items:flex-start"><canvas id="qrc" width="240" height="240" style="width:110px;height:110px;flex:none;border:1px solid var(--bd);border-radius:8px"></canvas>' +
     '<div style="flex:1"><p style="margin:0;font-weight:600;font-size:16px">' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + '</p><p class="mut" style="margin:0 0 6px">' + esc(a.model) + '</p>' + badge(a.status) + '</div></div>' +
@@ -543,6 +554,22 @@ function renderAsset(a) {
   const cv = $('#qrc'), x = cv.getContext('2d');
   drawQRTo(x, qrUrl(a.code), 0, 0, 240);
 }
+async function assignTo() {
+  let n = $('#hp').value;
+  if (!n) { toast('اختر الشخص', true); return; }
+  if (n === '__new__') {
+    n = $('#hpName').value.trim();
+    if (!n) { toast('أدخل اسم الشخص', true); return; }
+    const r = await api('apiAddPerson', n);
+    if (!r) return;
+    n = r.name;
+  }
+  const a = await api('apiAction', S.asset.code, 'إسناد', { holder: n, note: $('#hn').value });
+  if (!a) return;
+  await refresh();
+  renderAsset(a);
+  toast('تمت العهدة لـ ' + n);
+}
 async function act(action, data) {
   const a = await api('apiAction', S.asset.code, action, data);
   if (!a) return;
@@ -552,7 +579,7 @@ async function act(action, data) {
 }
 
 /* ---------- تقرير الأصول ---------- */
-const RP = { rows: [], view: [], sort: 'floor', dir: 1, group: '', f: { floor: '', room: '', kind: '', type: '', status: '', hold: '', q: '' } };
+const RP = { rows: [], view: [], sort: 'floor', dir: 1, group: '', f: { floor: '', room: '', kind: '', type: '', status: '', hold: '', person: '', q: '' } };
 const RP_COLS = [['code', 'الرمز'], ['type', 'النوع'], ['maker', 'الشركة'], ['serial', 'الرقم التسلسلي'], ['floor', 'الطابق'], ['door', 'الباب'], ['roomName', 'الغرفة'], ['status', 'الحالة'], ['holder', 'العهدة']];
 views.report = async function () {
   const r = await api('apiReport');
@@ -576,8 +603,9 @@ function rpRoomOpts() {
   return '<option value="">الكل</option>' + opts(rs, RP.f.room, function (r) { return r.code; }, function (r) { return r.name; });
 }
 function renderReport() {
-  const b = S.boot, f = RP.f, types = [];
-  RP.rows.forEach(function (a) { if (types.indexOf(a.type) < 0) types.push(a.type); });
+  const b = S.boot, f = RP.f, types = [], holders = [];
+  RP.rows.forEach(function (a) { if (types.indexOf(a.type) < 0) types.push(a.type); if (a.holder && holders.indexOf(a.holder) < 0) holders.push(a.holder); });
+  holders.sort(function (x, y) { return x.localeCompare(y, 'ar'); });
   const all = function (arr, sel, gv, gl) { return '<option value="">الكل</option>' + opts(arr, sel, gv, gl); };
   page('تقرير الأصول',
     '<div class="card noprint"><div class="grid2" style="margin:0">' +
@@ -587,16 +615,18 @@ function renderReport() {
     '<div><label>النوع</label><select id="rpT" onchange="rpFilter()">' + all(types, f.type) + '</select></div>' +
     '<div><label>الحالة</label><select id="rpS" onchange="rpFilter()">' + all(b.statuses, f.status) + '</select></div>' +
     '<div><label>العهدة</label><select id="rpH" onchange="rpFilter()"><option value="">الكل</option><option value="1"' + (f.hold === '1' ? ' selected' : '') + '>بعهدة</option><option value="0"' + (f.hold === '0' ? ' selected' : '') + '>غير مسحوب</option></select></div>' +
+    '<div><label>صاحب العهدة</label><select id="rpP" onchange="rpFilter()">' + all(holders, f.person) + '</select></div>' +
     '<div><label>تجميع حسب</label><select id="rpG" onchange="rpFilter()"><option value="">بلا تجميع</option><option value="floor"' + (RP.group === 'floor' ? ' selected' : '') + '>الطابق</option><option value="room"' + (RP.group === 'room' ? ' selected' : '') + '>الغرفة (الباب)</option></select></div>' +
     '<div><label>بحث</label><input id="rpQ" value="' + esc(f.q) + '" oninput="rpFilter()" placeholder="رمز، رقم تسلسلي، موديل…"></div></div>' +
-    '<div style="height:10px"></div><div class="grid2" style="margin:0"><button class="btn sm" onclick="rpCsv()">تحميل Excel (CSV)</button><button class="btn sm" onclick="window.print()">طباعة / PDF</button></div></div>' +
+    '<div style="height:10px"></div><div class="grid2" style="margin:0"><button class="btn sm" id="rpXl" onclick="rpXlsx()">تحميل التقرير (Excel)</button><button class="btn sm primary" id="rpXc" onclick="rpCustodyXlsx()">تصدير العهدة (Excel)</button>' +
+    '<button class="btn sm" style="grid-column:1/-1" onclick="window.print()">طباعة / PDF</button></div></div>' +
     '<div id="rpSum" class="mut" style="margin:0 0 8px"></div><div class="tblw" id="rpOut"></div>', false, true);
   rpDraw();
 }
 function rpFloor() { RP.f.floor = $('#rpF').value; RP.f.room = ''; $('#rpR').innerHTML = rpRoomOpts(); rpFilter(); }
 function rpFilter() {
   const g = function (id) { return $('#' + id).value; };
-  RP.f = { floor: g('rpF'), room: g('rpR'), kind: g('rpK'), type: g('rpT'), status: g('rpS'), hold: g('rpH'), q: g('rpQ').trim() };
+  RP.f = { floor: g('rpF'), room: g('rpR'), kind: g('rpK'), type: g('rpT'), status: g('rpS'), hold: g('rpH'), person: g('rpP'), q: g('rpQ').trim() };
   RP.group = g('rpG');
   rpDraw();
 }
@@ -614,6 +644,7 @@ function rpDraw() {
     if (f.status && a.status !== f.status) return false;
     if (f.hold === '1' && !a.holder) return false;
     if (f.hold === '0' && a.holder) return false;
+    if (f.person && a.holder !== f.person) return false;
     if (q && [a.code, a.serial, a.model, a.maker, a.type, a.roomName, a.room].join(' ').toLowerCase().indexOf(q) < 0) return false;
     return true;
   });
@@ -650,17 +681,69 @@ function rpDraw() {
   });
   $('#rpOut').innerHTML = h + '</tbody></table>';
 }
-function rpCsv() {
-  const head = ['الرمز', 'الفئة', 'النوع', 'الشركة', 'الموديل', 'الرقم التسلسلي', 'الطابق', 'رمز الباب', 'الغرفة', 'الحالة', 'العهدة', 'تاريخ الإضافة'];
-  const q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
-  const lines = [head.map(q).join(',')].concat(RP.view.map(function (a) {
-    return [a.code, a.kind, a.type, a.maker, a.model, a.serial, a.floorName, a.room, a.roomName, a.status, a.holder, a.createdAt].map(q).join(',');
-  }));
-  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+const EXCEL_URLS = ['https://cdnjs.cloudflare.com/ajax/libs/exceljs/4.4.0/exceljs.min.js', 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js'];
+async function ensureExcel() {
+  if (window.ExcelJS) return;
+  for (let i = 0; i < EXCEL_URLS.length; i++) {
+    try { await loadScript(EXCEL_URLS[i]); } catch (e) {}
+    if (window.ExcelJS) return;
+  }
+  throw new Error('تعذّر تحميل مكتبة Excel. تحقق من الإنترنت وأعد المحاولة.');
+}
+function xlSheet(wb, name, head, rows, widths) {
+  let nm = String(name || 'ورقة').replace(/[\\\/?*\[\]:]/g, ' ').trim().slice(0, 28) || 'ورقة', k = 2, base = nm;
+  while (wb.worksheets.some(function (w) { return w.name === nm; })) { nm = base + ' ' + k; k++; }
+  const ws = wb.addWorksheet(nm, { views: [{ rightToLeft: true, state: 'frozen', ySplit: 1 }] });
+  ws.addRow(head);
+  rows.forEach(function (r) { ws.addRow(r); });
+  head.forEach(function (h, i) { ws.getColumn(i + 1).width = widths[i] || 14; });
+  const hr = ws.getRow(1);
+  hr.font = { bold: true };
+  hr.alignment = { horizontal: 'center', vertical: 'middle' };
+  hr.eachCell(function (c) { c.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE1F5EE' } }; });
+  ws.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: head.length } };
+  return ws;
+}
+async function xlDownload(wb, name) {
+  const buf = await wb.xlsx.writeBuffer();
+  const blob = new Blob([buf], { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
   const url = URL.createObjectURL(blob), a = document.createElement('a');
-  a.href = url; a.download = 'assets-report.csv';
+  a.href = url; a.download = name;
   document.body.appendChild(a); a.click(); a.remove();
-  setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+  setTimeout(function () { URL.revokeObjectURL(url); }, 8000);
+}
+async function rpXlsx() {
+  if (!RP.view.length) { toast('لا توجد أصول لتصديرها', true); return; }
+  busy(true);
+  try {
+    await ensureExcel();
+    const wb = new ExcelJS.Workbook();
+    xlSheet(wb, 'التقرير', ['الرمز', 'الفئة', 'النوع', 'الشركة', 'الموديل', 'الرقم التسلسلي', 'الطابق', 'رمز الباب', 'الغرفة', 'الحالة', 'العهدة', 'تاريخ العهدة', 'تاريخ الإضافة'],
+      RP.view.map(function (a) { return [a.code, a.kind, a.type, a.maker, a.model, a.serial, a.floorName, a.room, a.roomName, a.status, a.holder, a.holderSince, a.createdAt]; }),
+      [24, 8, 16, 12, 16, 20, 14, 14, 18, 12, 18, 18, 18]);
+    await xlDownload(wb, 'assets-report.xlsx');
+  } catch (e) { toast(e.message || 'تعذّر إنشاء الملف', true); }
+  busy(false);
+}
+async function rpCustodyXlsx() {
+  const rows = RP.view.filter(function (a) { return a.holder; }).sort(function (x, y) {
+    return x.holder.localeCompare(y.holder, 'ar') || String(x.code).localeCompare(String(y.code), 'en', { numeric: true });
+  });
+  if (!rows.length) { toast('لا توجد أصول بعهدة ضمن الفلاتر الحالية', true); return; }
+  busy(true);
+  try {
+    await ensureExcel();
+    const wb = new ExcelJS.Workbook();
+    const head = ['صاحب العهدة', 'الرمز', 'الفئة', 'النوع', 'الشركة', 'الموديل', 'الرقم التسلسلي', 'الطابق', 'الغرفة', 'رمز الباب', 'الحالة', 'تاريخ العهدة'];
+    const widths = [20, 24, 8, 16, 12, 16, 20, 14, 18, 14, 12, 18];
+    const line = function (a) { return [a.holder, a.code, a.kind, a.type, a.maker, a.model, a.serial, a.floorName, a.roomName, a.room, a.status, a.holderSince]; };
+    xlSheet(wb, 'العهدة', head, rows.map(line), widths);
+    const by = {};
+    rows.forEach(function (a) { (by[a.holder] = by[a.holder] || []).push(a); });
+    Object.keys(by).forEach(function (h) { xlSheet(wb, h, head, by[h].map(line), widths); });
+    await xlDownload(wb, 'custody.xlsx');
+  } catch (e) { toast(e.message || 'تعذّر إنشاء الملف', true); }
+  busy(false);
 }
 
 /* ---------- المسح ---------- */
@@ -668,7 +751,7 @@ views.scan = function () {
   page('مسح رمز',
     '<div class="card"><button class="btn primary" onclick="liveScan()">الكاميرا المباشرة</button><div style="height:8px"></div>' +
     '<label style="margin-top:0">أو التقط صورة للرمز</label><input type="file" accept="image/*" capture="environment" onchange="photoScan(this)">' +
-    '<label>أو اكتب الرمز يدوياً</label><div class="row"><input id="mc" dir="ltr" placeholder="SH-MN-A12-01-001"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">فتح</button></div></div>');
+    '<label>أو اكتب الرمز يدوياً</label><div class="row"><input id="mc" dir="ltr" placeholder="SH-MN-A12-001"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">فتح</button></div></div>');
   setTimeout(liveScan, 250);
 };
 function openCode(t) {
