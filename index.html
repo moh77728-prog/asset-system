@@ -53,12 +53,13 @@ summary{cursor:pointer;font-weight:600}
 @keyframes sp{to{transform:rotate(360deg)}}
 #ov{position:fixed;inset:0;background:#000d;z-index:45;display:none;flex-direction:column;align-items:center;justify-content:center;padding:12px;gap:10px}
 #ov .box{background:#fff;border-radius:12px;padding:12px;width:100%;max-width:440px}
-#rd{width:100%;min-height:200px;background:#000;border-radius:8px;overflow:hidden}
+#rd{position:relative;width:100%;min-height:200px;background:#000;border-radius:8px;overflow:hidden}
+#rd video{display:block;width:100%;max-height:55vh;object-fit:cover}
+#rd .aim{position:absolute;left:6%;right:6%;top:25%;bottom:25%;border:2px solid rgba(255,255,255,.75);border-radius:8px;pointer-events:none}
 canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#fff}
 .ok-box{background:var(--ok2);color:var(--ok);border-radius:10px;padding:10px;margin:0 0 10px}
 .warnbox{background:var(--warn2);color:var(--warn);border-radius:10px;padding:10px;margin:0 0 10px}
 </style>
-<script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
@@ -483,16 +484,8 @@ async function photoScan(inp) {
   const f = inp.files && inp.files[0];
   if (!f) return;
   busy(true);
-  try { const t = await decodeFile(f); busy(false); openCode(t); }
-  catch (e) { busy(false); toast('تعذّرت قراءة الصورة. قرّب الكاميرا وحسّن الإضاءة وأعد المحاولة', true); }
-}
-async function decodeFile(file) {
-  const el = document.createElement('div');
-  el.id = 'tmpdec'; el.style.display = 'none';
-  document.body.appendChild(el);
-  const h = new Html5Qrcode('tmpdec');
-  try { return await h.scanFile(file, false); }
-  finally { try { h.clear(); } catch (e) {} el.remove(); }
+  try { const r = await decodeImageFile(f); busy(false); openCode(r.text); }
+  catch (e) { busy(false); toast('تعذّرت قراءة الصورة. قرّب الباركود ليملأ عرض الصورة وحسّن الإضاءة وأعد المحاولة', true); }
 }
 function loadScript(src) {
   return new Promise(function (res, rej) {
@@ -508,45 +501,202 @@ async function ocrFile(file) {
   m.sort(function (a, b) { return b.length - a.length; });
   return m[0] || '';
 }
+
+/* BEGIN SCANNER CORE */
+const ZX_URLS = ['https://cdn.jsdelivr.net/npm/@zxing/library@0.21.3/umd/index.min.js', 'https://unpkg.com/@zxing/library@0.21.3/umd/index.min.js'];
+async function ensureZX() {
+  if (window.ZXing) return;
+  for (let i = 0; i < ZX_URLS.length; i++) {
+    try { await loadScript(ZX_URLS[i]); } catch (e) {}
+    if (window.ZXing) return;
+  }
+  throw new Error('تعذّر تحميل مكتبة القراءة. تحقق من الإنترنت.');
+}
+let ZX_READER = null;
+function zxReader() {
+  if (ZX_READER) return ZX_READER;
+  const Z = window.ZXing, F = Z.BarcodeFormat, h = new Map();
+  h.set(Z.DecodeHintType.POSSIBLE_FORMATS, [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A, F.UPC_E]);
+  h.set(Z.DecodeHintType.TRY_HARDER, true);
+  ZX_READER = new Z.MultiFormatReader();
+  ZX_READER.setHints(h);
+  return ZX_READER;
+}
+function lumOf(d) {
+  const n = d.width * d.height, out = new Uint8ClampedArray(n), p = d.data;
+  for (let i = 0, j = 0; i < n; i++, j += 4) out[i] = (p[j] * 77 + p[j + 1] * 150 + p[j + 2] * 29) >> 8;
+  return out;
+}
+function frameLum(src, sw, sh, maxSide, cv) {
+  const sc = Math.min(1, maxSide / Math.max(sw, sh)), w = Math.max(1, Math.round(sw * sc)), h = Math.max(1, Math.round(sh * sc));
+  cv.width = w; cv.height = h;
+  const x = cv.getContext('2d', { willReadFrequently: true });
+  x.drawImage(src, 0, 0, w, h);
+  return { lum: lumOf(x.getImageData(0, 0, w, h)), w: w, h: h };
+}
+function rot90(lum, w, h) {
+  const o = new Uint8ClampedArray(w * h);
+  for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) o[x * h + (h - 1 - y)] = lum[y * w + x];
+  return { lum: o, w: h, h: w };
+}
+function zxDecode(lum, w, h, deep) {
+  const Z = window.ZXing, rd = zxReader();
+  const bins = deep ? [Z.HybridBinarizer, Z.GlobalHistogramBinarizer] : [Z.HybridBinarizer];
+  for (let i = 0; i < bins.length; i++) {
+    try {
+      const r = rd.decode(new Z.BinaryBitmap(new bins[i](new Z.RGBLuminanceSource(lum, w, h))));
+      if (r && r.getText()) return { text: r.getText(), format: Z.BarcodeFormat[r.getBarcodeFormat()] };
+    } catch (e) {}
+  }
+  return null;
+}
+async function makeNative() {
+  try {
+    if (!('BarcodeDetector' in window)) return null;
+    const sup = await BarcodeDetector.getSupportedFormats();
+    const f = ['qr_code', 'code_128', 'code_39', 'ean_13', 'ean_8', 'upc_a', 'upc_e'].filter(function (x) { return sup.indexOf(x) >= 0; });
+    return f.length ? new BarcodeDetector({ formats: f }) : null;
+  } catch (e) { return null; }
+}
+async function imgToSource(file) {
+  if (window.createImageBitmap) { try { return await createImageBitmap(file); } catch (e) {} }
+  return await new Promise(function (res, rej) {
+    const im = new Image();
+    im.onload = function () { res(im); };
+    im.onerror = rej;
+    im.src = URL.createObjectURL(file);
+  });
+}
+async function decodeImageFile(file) {
+  await ensureZX();
+  const src = await imgToSource(file);
+  const sw = src.width || src.naturalWidth, sh = src.height || src.naturalHeight;
+  const native = await makeNative();
+  if (native) {
+    try { const d = await native.detect(src); if (d && d.length) return { text: d[0].rawValue, format: d[0].format }; } catch (e) {}
+  }
+  const cv = document.createElement('canvas'), sides = [2000, 1280, 3000, 800];
+  for (let i = 0; i < sides.length; i++) {
+    const f = frameLum(src, sw, sh, sides[i], cv);
+    let r = zxDecode(f.lum, f.w, f.h, true);
+    if (!r) { const q = rot90(f.lum, f.w, f.h); r = zxDecode(q.lum, q.w, q.h, true); }
+    if (r) return r;
+    await new Promise(function (res) { setTimeout(res, 0); });
+  }
+  throw new Error('NOTFOUND');
+}
+async function startLive(video, isClosed, onFound) {
+  if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('NOCAM');
+  await ensureZX();
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
+  const stopAll = function () { try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} };
+  if (isClosed()) { stopAll(); return null; }
+  video.srcObject = stream; video.muted = true; video.setAttribute('playsinline', '');
+  await video.play();
+  const track = stream.getVideoTracks()[0];
+  let caps = {};
+  try { caps = track.getCapabilities ? track.getCapabilities() : {}; } catch (e) {}
+  if (caps.focusMode && caps.focusMode.indexOf('continuous') >= 0) { try { await track.applyConstraints({ advanced: [{ focusMode: 'continuous' }] }); } catch (e) {} }
+  const native = await makeNative();
+  const cv = document.createElement('canvas');
+  let alive = true, last = '', lastT = 0, n = 0;
+  const ctl = {
+    hasTorch: !!caps.torch, torchOn: false,
+    torch: async function (on) {
+      try { await track.applyConstraints({ advanced: [{ torch: !!on }] }); ctl.torchOn = !!on; return true; } catch (e) { return false; }
+    },
+    stop: function () { alive = false; stopAll(); try { video.srcObject = null; } catch (e) {} }
+  };
+  (async function loop() {
+    while (alive && !isClosed()) {
+      const t0 = Date.now();
+      try {
+        if (video.readyState >= 2 && video.videoWidth) {
+          let r = null;
+          if (native) {
+            try { const d = await native.detect(video); if (d && d.length) r = { text: d[0].rawValue, format: d[0].format }; } catch (e) {}
+          }
+          if (!r) {
+            const f = frameLum(video, video.videoWidth, video.videoHeight, 1600, cv);
+            r = zxDecode(f.lum, f.w, f.h, false);
+            if (!r && n % 3 === 2) { const q = rot90(f.lum, f.w, f.h); r = zxDecode(q.lum, q.w, q.h, false); }
+            if (!r && n % 4 === 3) r = zxDecode(f.lum, f.w, f.h, true);
+          }
+          n++;
+          if (r && r.text) {
+            const now = Date.now();
+            if (r.text === last && now - lastT < 2500) {
+              if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
+              alive = false;
+              onFound(r);
+              return;
+            }
+            last = r.text; lastT = now;
+          }
+        }
+      } catch (e) {}
+      await new Promise(function (res) { setTimeout(res, Math.max(30, 110 - (Date.now() - t0))); });
+    }
+  })();
+  return ctl;
+}
+/* END SCANNER CORE */
+
 function scannerUI(title, onText, o) {
   const ov = $('#ov');
   ov.style.display = 'flex';
   ov.innerHTML = '<div class="box"><div class="row" style="justify-content:space-between;margin-bottom:8px"><b>' + esc(title) + '</b><button class="btn sm" style="width:auto" id="scx">إغلاق</button></div>' +
-    '<div id="rd"></div><p class="mut" id="scm" style="margin:6px 0">وجّه الكاميرا نحو الرمز</p>' +
-    '<label style="margin-top:4px">التقاط صورة للباركود أو QR</label><input type="file" accept="image/*" capture="environment" id="scp">' +
+    '<div id="rd"><video id="rv" playsinline muted autoplay></video><div class="aim"></div></div>' +
+    '<p class="mut" id="scm" style="margin:6px 0">جارٍ فتح الكاميرا…</p>' +
+    '<div class="row" style="margin-bottom:6px"><button class="btn sm" id="sct" style="display:none">تشغيل الفلاش</button></div>' +
+    '<label style="margin-top:4px">أو التقط صورة للباركود أو QR</label><input type="file" accept="image/*" capture="environment" id="scp">' +
     (o.ocr ? '<label>قراءة نص الرقم التسلسلي من صورة (قد تخطئ في بعض الحروف)</label><input type="file" accept="image/*" capture="environment" id="sco">' : '') + '</div>';
-  let h = null, started = false;
+  let ctl = null, closed = false;
+  const msg = function (t) { const e = $('#scm'); if (e) e.textContent = t; };
   const close = async function () {
-    try { if (h && started) await h.stop(); } catch (e) {}
-    try { if (h) h.clear(); } catch (e) {}
+    closed = true;
+    try { if (ctl) ctl.stop(); } catch (e) {}
     ov.style.display = 'none'; ov.innerHTML = '';
   };
   const done = async function (t) { await close(); onText(t); };
   $('#scx').onclick = close;
   $('#scp').onchange = async function () {
     const f = this.files[0]; if (!f) return;
-    $('#scm').textContent = 'جارٍ قراءة الصورة…';
-    try { const t = await decodeFile(f); await done(t); }
-    catch (e) { $('#scm').textContent = 'تعذّرت القراءة. قرّب الصورة وحسّن الإضاءة وأعد المحاولة.'; }
+    msg('جارٍ قراءة الصورة…');
+    try { const r = await decodeImageFile(f); await done(r.text); }
+    catch (e) { msg('تعذّرت القراءة. قرّب الباركود ليملأ عرض الصورة، وحسّن الإضاءة، وأعد المحاولة.'); }
   };
   if (o.ocr) {
     $('#sco').onchange = async function () {
       const f = this.files[0]; if (!f) return;
-      $('#scm').textContent = 'جارٍ قراءة النص… قد يستغرق لحظات';
+      msg('جارٍ قراءة النص… قد يستغرق لحظات');
       try {
         const t = await ocrFile(f);
-        if (t) await done(t); else $('#scm').textContent = 'لم يُعثر على رقم واضح. أعد التصوير أو اكتب الرقم يدوياً.';
-      } catch (e) { $('#scm').textContent = 'تعذّرت قراءة النص. اكتب الرقم يدوياً.'; }
+        if (t) await done(t); else msg('لم يُعثر على رقم واضح. أعد التصوير أو اكتب الرقم يدوياً.');
+      } catch (e) { msg('تعذّرت قراءة النص. اكتب الرقم يدوياً.'); }
     };
   }
-  try {
-    const F = window.Html5QrcodeSupportedFormats;
-    h = new Html5Qrcode('rd', { formatsToSupport: F ? [F.QR_CODE, F.CODE_128, F.CODE_39] : undefined, experimentalFeatures: { useBarCodeDetectorIfSupported: true } });
-    h.start({ facingMode: 'environment' }, { fps: 12, qrbox: function (vw) { const w = Math.floor(Math.min(vw, 380) * 0.9); return { width: w, height: Math.floor(w * 0.6) }; } },
-      function (t) { done(t); }, function () {})
-      .then(function () { started = true; })
-      .catch(function () { $('#scm').textContent = 'تعذّر فتح الكاميرا. اسمح للمتصفح بالوصول إلى الكاميرا من إعدادات الموقع، أو استخدم خيار التقاط صورة أدناه.'; });
-  } catch (e) { $('#scm').textContent = 'تعذّر فتح الكاميرا. استخدم خيار التقاط صورة أدناه.'; }
+  startLive($('#rv'), function () { return closed; }, function (r) { done(r.text); })
+    .then(function (c) {
+      if (!c) return;
+      if (closed) { c.stop(); return; }
+      ctl = c;
+      msg('قرّب الباركود ليملأ عرض الشاشة تقريباً وثبّت يدك ثانيتين');
+      if (c.hasTorch) {
+        const b = $('#sct');
+        b.style.display = 'block';
+        b.onclick = async function () {
+          const ok = await ctl.torch(!ctl.torchOn);
+          if (ok) b.textContent = ctl.torchOn ? 'إطفاء الفلاش' : 'تشغيل الفلاش';
+        };
+      }
+    })
+    .catch(function (e) {
+      const n = e && e.name;
+      if (n === 'NotAllowedError' || n === 'SecurityError') msg('إذن الكاميرا مرفوض. اسمح بالكاميرا من إعدادات المتصفح للموقع، أو استخدم التقاط صورة أدناه.');
+      else if (n === 'NotFoundError' || (e && e.message === 'NOCAM')) msg('لا توجد كاميرا متاحة. استخدم التقاط صورة أدناه.');
+      else msg('تعذّر فتح الكاميرا المباشرة. استخدم التقاط صورة أدناه.');
+    });
 }
 
 /* ---------- رسم QR والملصقات ---------- */
@@ -589,12 +739,22 @@ function drawLabel(a, mode, wmm, hmm) {
   x.font = 'bold ' + cf + 'px monospace';
   x.fillText(a.code, left + tw / 2, H - p);
   if (mode !== 'qr') {
-    const bc = document.createElement('canvas');
     try {
-      JsBarcode(bc, a.code, { format: 'CODE128', displayValue: false, margin: 0, width: 2, height: 60 });
-      const barH = Math.round(H * 0.25), top = H - p - cf - 6 - barH;
-      x.imageSmoothingEnabled = false;
-      x.drawImage(bc, left, Math.max(top, y + 6), tw, barH);
+      const bc = document.createElement('canvas');
+      JsBarcode(bc, a.code, { format: 'CODE128', displayValue: false, margin: 0, width: 1, height: 1 });
+      const M = bc.width, px = bc.getContext('2d').getImageData(0, 0, M, 1).data;
+      let mw = Math.floor(tw / (M + 16));
+      if (mw < 1) mw = tw / M;
+      const bw = Math.round(M * mw), bx = left + Math.round((tw - bw) / 2);
+      const barH = Math.round(H * 0.25), top = Math.max(H - p - cf - 6 - barH, y + 6);
+      x.fillStyle = '#000';
+      for (let i = 0; i < M;) {
+        if (px[i * 4] >= 128) { i++; continue; }
+        let j = i; while (j < M && px[j * 4] < 128) j++;
+        const x0 = Math.round(i * mw), x1 = Math.round(j * mw);
+        x.fillRect(bx + x0, top, Math.max(1, x1 - x0), barH);
+        i = j;
+      }
     } catch (e) {}
   }
   return c;
@@ -634,7 +794,8 @@ function expOpts() {
 }
 function updPrev() {
   const o = expOpts(), it = S.exp.items[0];
-  $('#xhint').textContent = (o.mode === 'both' && o.w < 60) ? 'للنوعين معاً يُنصح بملصق بعرض 60 مم أو أكثر' : '';
+  const bm = 11 * it.code.length + 35, need = Math.ceil(bm / 4 + 3 + (o.mode === 'both' ? o.h - 1.5 : 0));
+  $('#xhint').textContent = (o.mode !== 'qr' && o.w < need) ? 'باركود Code 128 لهذا الرمز لا يُقرأ بثقة بالجوال على ملصق عرضه أقل من ' + need + ' مم. استخدم QR، أو ملصقاً أعرض.' : '';
   const c = drawLabel(it, o.mode, o.w, o.h), pv = $('#xp');
   pv.width = c.width; pv.height = c.height;
   pv.getContext('2d').drawImage(c, 0, 0);
@@ -677,6 +838,7 @@ async function runExport(kind) {
 
 /* ---------- بدء التشغيل ---------- */
 (async function init() {
+  setTimeout(function () { ensureZX().catch(function () {}); }, 1500);
   S.token = loadTok();
   if (!S.token) { show('login'); return; }
   busy(true);
