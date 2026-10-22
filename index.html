@@ -15,6 +15,15 @@ body{margin:0;background:var(--bg);color:var(--tx);font-family:system-ui,-apple-
 .tt{font-weight:600;font-size:16px;text-align:center;flex:1}
 .ic{width:40px;height:36px;border:0;background:rgba(255,255,255,.15);color:#fff;border-radius:8px;font-size:18px;cursor:pointer}
 .wrap{max-width:560px;margin:0 auto;padding:12px}
+.wrap.wide{max-width:1100px}
+.tblw{overflow-x:auto;border:1px solid var(--bd);border-radius:10px;background:#fff}
+table.rp{border-collapse:collapse;width:100%;font-size:13px}
+table.rp th{background:var(--pri2);color:var(--pri);cursor:pointer;white-space:nowrap;padding:8px 10px;text-align:right;border-bottom:1px solid var(--bd);user-select:none}
+table.rp td{padding:7px 10px;border-top:1px solid var(--bd);white-space:nowrap}
+table.rp tr.clk{cursor:pointer}
+table.rp tr.clk:hover{background:#f4f9f7}
+table.rp tr.gh td{background:#f1f3f5;font-weight:600}
+@media print{.top,.noprint,#toast,#busy{display:none!important}body{background:#fff}.wrap.wide{max-width:none;padding:0}.tblw{overflow:visible;border:0}table.rp{font-size:11px}table.rp th{background:#eee;color:#000}}
 .card{background:var(--card);border:1px solid var(--bd);border-radius:12px;padding:12px;margin:0 0 12px}
 .card h3{margin:0 0 6px;font-size:16px}
 .sub{margin:0 0 10px;color:var(--mut);font-size:13px}
@@ -138,11 +147,11 @@ function logout(expired) {
   show('login');
   if (expired) toast('انتهت الجلسة، سجّل الدخول من جديد', true);
 }
-function page(title, html, noBack) {
+function page(title, html, noBack, wide) {
   const bk = S.stack.length && !noBack
     ? '<button class="ic" onclick="back()" aria-label="رجوع">→</button>'
     : '<span style="width:40px"></span>';
-  $('#app').innerHTML = '<div class="top">' + bk + '<div class="tt">' + esc(title) + '</div><button class="ic" onclick="home()" aria-label="الرئيسية">⌂</button></div><div class="wrap">' + html + '</div>';
+  $('#app').innerHTML = '<div class="top">' + bk + '<div class="tt">' + esc(title) + '</div><button class="ic" onclick="home()" aria-label="الرئيسية">⌂</button></div><div class="wrap' + (wide ? ' wide' : '') + '">' + html + '</div>';
   window.scrollTo(0, 0);
 }
 function badge(st) {
@@ -207,7 +216,9 @@ views.home = function () {
     '<div class="mc"><span>في العهدة الآن</span><b>' + st.custody + '</b></div>' +
     '<div class="mc"><span>تحتاج صيانة</span><b>' + st.maint + '</b></div>' +
     '<div class="mc"><span>لم يُطبع ملصقها</span><b>' + st.unprinted + '</b></div></div>' +
-    '<div class="grid2"><button class="btn primary" onclick="go(\'scan\')">مسح رمز</button>' +
+    '<div class="grid2"><button class="btn primary" onclick="openAdd()">إضافة أصل</button>' +
+    '<button class="btn primary" onclick="go(\'scan\')">مسح رمز</button>' +
+    '<button class="btn" onclick="go(\'report\')">تقرير الأصول</button>' +
     '<button class="btn" onclick="go(\'rooms\')">الغرف والأصول</button>' +
     '<button class="btn" onclick="go(\'export\')">تصدير الملصقات</button>' +
     '<button class="btn" onclick="logout()">تسجيل الخروج</button></div>' +
@@ -267,117 +278,197 @@ views.room = async function (p) {
   };
   page(r.roomName,
     '<p class="sub">' + esc(r.floorName) + '</p>' +
-    '<div class="grid2"><button class="btn primary" onclick="go(\'addAsset\',{kind:\'جهاز\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة جهاز</button>' +
-    '<button class="btn primary" onclick="go(\'addAsset\',{kind:\'أثاث\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة أثاث</button></div>' +
+    '<div class="grid2"><button class="btn primary" onclick="openAdd({kind:\'جهاز\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة جهاز</button>' +
+    '<button class="btn primary" onclick="openAdd({kind:\'أثاث\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة أثاث</button></div>' +
     list(dev, 'الأجهزة') + list(fur, 'الأثاث'));
 };
 
 /* ---------- إضافة أصل ---------- */
-function formDraft() {
-  const g = function (id) { const e = $('#' + id); return e ? e.value : ''; };
-  return { model: g('fModel'), serial: g('fSerial'), status: g('fStatus'), notes: g('fNotes'), qty: g('fQty') };
+const ADD = { kind: 'جهاز', floor: '', room: '', type: '', maker: '', model: '', status: 'سليم', qty: '1', notes: '', serial: '', n: 0, viaScan: false, found: null };
+function cleanDoor(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8); }
+function roomByCode(c) {
+  c = cleanDoor(c);
+  return c ? S.boot.rooms.find(function (r) { return r.code === c; }) : null;
 }
-views.addAsset = async function (p) {
-  const b = S.boot, dev = p.kind === 'جهاز', d = p.draft || {};
-  const rl = await api('apiRoomAssets', p.floor, p.room);
-  S.roomList = rl ? rl.assets : [];
-  const roomName = rl ? rl.roomName : '';
-  const types = dev ? b.devTypes : b.furnTypes;
-  const preT = p.preType || (types[0] && types[0].name);
-  let h = '<p class="sub">الغرفة: ' + esc(roomName) + '</p>' +
-    '<div class="card"><h3>تحقق أولاً: هل الأصل مسجّل؟</h3>' +
-    '<label style="margin-top:0">' + (dev ? 'الرقم التسلسلي للجهاز' : 'رمز الأصل (من ملصقه)') + '</label>' +
-    '<div class="row"><input id="lkQ" dir="ltr" value="' + esc(p.lookup || '') + '" onkeydown="if(event.key===\'Enter\')doLookup()"><button class="btn sm" style="width:auto" onclick="scanLookup()">كاميرا</button></div>' +
-    '<div style="height:8px"></div><div class="grid2" style="margin:0"><button class="btn primary" onclick="doLookup()">تحقق</button><button class="btn" onclick="openNewForm(\'\')">إنشاء جديد دون تحقق</button></div>' +
-    '<div id="lkRes" style="margin-top:10px"></div></div>';
-  h += '<div id="newForm" style="display:' + (p.formOpen ? 'block' : 'none') + '"><div class="card"><label style="margin-top:0">النوع</label><select id="fType" onchange="typeSel(this)">' +
-    opts(types, preT, function (t) { return t.name; }, function (t) { return t.name + ' (' + t.code + ')'; }) + '<option value="__new__">+ نوع جديد</option></select>' +
-    '<div id="sameBox" class="mut" style="margin-top:4px"></div>' +
-    '<div id="newType" style="display:none"><label>اسم النوع الجديد</label><input id="ntName"><label>رمز النوع (2 إلى 4 حروف إنجليزية)</label><input id="ntCode" dir="ltr" maxlength="4">' +
-    '<div style="height:8px"></div><button class="btn sm" onclick="saveType()">حفظ النوع</button></div>';
+function findRoomByScan(t) {
+  const raw = String(t || '').trim(), cand = [raw, parseCode(raw)];
+  try { const u = new URL(raw); cand.push(u.pathname.split('/').pop()); } catch (e) {}
+  raw.split(/[\s\-_\/|,;:]+/).forEach(function (x) { cand.push(x); });
+  for (let i = 0; i < cand.length; i++) { const r = roomByCode(cand[i]); if (r) return r; }
+  return null;
+}
+function adSync() {
+  const g = function (id) { const e = $('#' + id); return e ? e.value : null; };
+  const m = { type: 'adT', maker: 'adM', model: 'adModel', status: 'adSt', qty: 'adQty', notes: 'adN', serial: 'adS' };
+  Object.keys(m).forEach(function (k) { const v = g(m[k]); if (v !== null && v !== '__new__') ADD[k] = v; });
+}
+function openAdd(p) {
+  p = p || {};
+  if (p.kind) ADD.kind = p.kind;
+  if (p.floor) { ADD.floor = p.floor; ADD.room = p.room || ''; }
+  ADD.n = 0; ADD.found = null; ADD.serial = ''; ADD.viaScan = false;
+  go('addAsset');
+}
+views.addAsset = function () { renderAdd(); };
+function renderAdd() {
+  const b = S.boot, dev = ADD.kind === 'جهاز', types = dev ? b.devTypes : b.furnTypes;
+  if (!b.floors.some(function (f) { return f.code === ADD.floor; })) { ADD.floor = b.floors[0] ? b.floors[0].code : ''; ADD.room = ''; }
+  if (ADD.room && !b.rooms.some(function (r) { return r.code === ADD.room && r.floor === ADD.floor; })) ADD.room = '';
+  if (!types.some(function (t) { return t.name === ADD.type; })) ADD.type = '';
+  if (dev && b.makers.indexOf(ADD.maker) < 0) ADD.maker = '';
+  const seg = function (k) { return '<button class="btn' + (ADD.kind === k ? ' primary' : '') + '" onclick="adKind(\'' + k + '\')">' + (k === 'جهاز' ? 'جهاز' : 'أثاث') + '</button>'; };
+  let h = '<div class="grid2" style="margin-bottom:12px">' + seg('جهاز') + seg('أثاث') + '</div>';
+  h += '<div class="card"><h3>الموقع</h3><label style="margin-top:0">الطابق</label><select id="adF" onchange="adFloor()">' +
+    opts(b.floors, ADD.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
+    '<label>اسم المكتب / الغرفة</label><select id="adR" onchange="adRoom()"></select>' +
+    '<label>رمز الباب (يظهر عند اختيار الغرفة، أو اكتبه أو صوّره)</label>' +
+    '<div class="row"><input id="adDoor" dir="ltr" autocapitalize="characters" oninput="doorTyped()" onchange="doorDone()"><button class="btn sm" style="width:auto" onclick="scanDoor()">كاميرا</button></div>' +
+    '<div id="adDoorNote"></div></div>';
+  h += '<div class="card"><h3>' + (dev ? 'الجهاز' : 'الأثاث') + '</h3><label style="margin-top:0">' + (dev ? 'نوع الجهاز' : 'نوع الأثاث') + '</label>' +
+    '<select id="adT" onchange="adType(this)"><option value="">— اختر —</option>' + opts(types, ADD.type, function (t) { return t.name; }, function (t) { return t.name; }) + '<option value="__new__">+ نوع جديد</option></select>' +
+    '<div id="adNewT" style="display:none"><label>اسم النوع الجديد</label><input id="ntName"><div style="height:8px"></div><button class="btn sm" onclick="saveType()">حفظ النوع</button></div>';
   if (dev) {
-    h += '<label>الشركة المصنّعة</label><select id="fMaker" onchange="$(\'#newMaker\').style.display=this.value===\'__new__\'?\'block\':\'none\'">' +
-      opts(b.makers, p.preMaker || '', null, null) + '<option value="__new__">+ شركة جديدة</option></select>' +
-      '<div id="newMaker" style="display:none"><label>اسم الشركة</label><input id="nmName" dir="ltr"><div style="height:8px"></div><button class="btn sm" onclick="saveMaker()">حفظ الشركة</button></div>' +
-      '<label>الموديل</label><input id="fModel" dir="ltr" value="' + esc(d.model) + '">' +
-      '<label>الرقم التسلسلي</label><div class="row"><input id="fSerial" dir="ltr" value="' + esc(d.serial) + '"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div>' +
-      '<small>باركود Code 128 أو نص، وراجع الرقم قبل الحفظ</small>';
+    h += '<label>الشركة المصنّعة</label><select id="adM" onchange="adMaker(this)"><option value="">— اختر —</option>' + opts(b.makers, ADD.maker) + '<option value="__new__">+ شركة جديدة</option></select>' +
+      '<div id="adNewM" style="display:none"><label>اسم الشركة</label><input id="nmName" dir="ltr"><div style="height:8px"></div><button class="btn sm" onclick="saveMaker()">حفظ الشركة</button></div>' +
+      '<label>الرقم التسلسلي</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" oninput="ADD.viaScan=false" onchange="adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div>' +
+      '<small id="adSChk" class="mut">صوّر الباركود أو اكتب الرقم، وسيُفحص تلقائياً</small>' +
+      '<label>الموديل (اختياري)</label><input id="adModel" dir="ltr" value="' + esc(ADD.model) + '">';
   } else {
-    h += '<label>الوصف أو الموديل (اختياري)</label><input id="fModel" value="' + esc(d.model) + '">' +
-      '<label>العدد (ينشئ رمزاً مستقلاً لكل قطعة)</label><input id="fQty" type="number" min="1" max="100" value="' + esc(d.qty || 1) + '">';
+    h += '<label>الوصف (اختياري)</label><input id="adModel" value="' + esc(ADD.model) + '">' +
+      '<label>العدد (رمز مستقل لكل قطعة)</label><input id="adQty" type="number" min="1" max="100" value="' + esc(ADD.qty) + '">' +
+      '<label>تحقق: هل الأثاث مسجّل؟ (رمز الملصق، اختياري)</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" onchange="adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div><small id="adSChk" class="mut"></small>';
   }
-  h += '<label>الحالة</label><select id="fStatus">' + opts(b.statuses, d.status || 'سليم') + '</select>' +
-    '<label>ملاحظات</label><input id="fNotes" value="' + esc(d.notes) + '">' +
-    '<div style="height:12px"></div><button class="btn primary" onclick="saveAsset()">حفظ</button></div></div>';
+  h += '<div id="adFound"></div>' +
+    '<label>الحالة</label><select id="adSt">' + opts(b.statuses, ADD.status || 'سليم') + '</select>' +
+    '<label>ملاحظات</label><input id="adN" value="' + esc(ADD.notes) + '">' +
+    '<div style="height:12px"></div><button class="btn primary" id="adSaveBtn" onclick="adSave()">حفظ</button><div id="adMsg" style="margin-top:10px"></div>' +
+    '<div style="height:6px"></div><button class="btn" onclick="home()">إنهاء والعودة للقائمة</button></div>';
   page(dev ? 'إضافة جهاز' : 'إضافة أثاث', h);
-  updSame();
-};
-function typeSel(sel) {
-  $('#newType').style.display = sel.value === '__new__' ? 'block' : 'none';
-  updSame();
+  adFillRooms();
+  if (ADD.found) renderFound(ADD.found);
 }
-function updSame() {
-  const box = $('#sameBox'), ft = $('#fType');
-  if (!box || !ft) return;
-  const t = ft.value, list = (S.roomList || []).filter(function (a) { return a.type === t; });
-  box.innerHTML = list.length
-    ? 'مسجّل في هذه الغرفة من هذا النوع: <b>' + list.length + '</b> — <span class="code">' + list.slice(0, 6).map(function (a) { return esc(a.code); }).join(', ') + (list.length > 6 ? ' …' : '') + '</span>'
-    : '';
+function adFillRooms() {
+  const rs = S.boot.rooms.filter(function (r) { return r.floor === ADD.floor; });
+  $('#adR').innerHTML = '<option value="">— اختر الغرفة —</option>' + rs.map(function (r) {
+    return '<option value="' + esc(r.code) + '"' + (r.code === ADD.room ? ' selected' : '') + '>' + esc(r.name) + '</option>';
+  }).join('');
+  $('#adDoor').value = ADD.room;
 }
-function openNewForm(q) {
-  $('#newForm').style.display = 'block';
-  const s = $('#fSerial');
-  if (q && s && !s.value) s.value = q;
+function adKind(k) { adSync(); ADD.kind = k; ADD.type = ''; ADD.serial = ''; ADD.found = null; renderAdd(); }
+function adFloor() { ADD.floor = $('#adF').value; ADD.room = ''; $('#adDoorNote').innerHTML = ''; $('#adDoorNote').removeAttribute('data-code'); adFillRooms(); }
+function adRoom() { ADD.room = $('#adR').value; $('#adDoor').value = ADD.room; $('#adDoorNote').innerHTML = ''; $('#adDoorNote').removeAttribute('data-code'); if (ADD.found) renderFound(ADD.found); }
+function pickRoom(r) {
+  ADD.floor = r.floor; ADD.room = r.code;
+  $('#adF').value = r.floor; adFillRooms();
+  $('#adDoorNote').innerHTML = ''; $('#adDoorNote').removeAttribute('data-code');
+  if (ADD.found) renderFound(ADD.found);
 }
-function scanLookup() {
-  const dev = S.curP.kind === 'جهاز';
-  scannerUI(dev ? 'قراءة الرقم التسلسلي أو الرمز' : 'قراءة رمز الأصل', function (t) {
-    $('#lkQ').value = parseCode(t);
-    doLookup();
+function doorTyped() {
+  const r = roomByCode($('#adDoor').value);
+  if (r) pickRoom(r);
+}
+function doorDone() {
+  const v = cleanDoor($('#adDoor').value);
+  if (!v) return;
+  const r = roomByCode(v);
+  if (r) { pickRoom(r); return; }
+  const nb = $('#adDoorNote');
+  if (nb.getAttribute('data-code') === v && nb.innerHTML) return;
+  nb.setAttribute('data-code', v);
+  nb.innerHTML = '<div class="warnbox">الباب <b class="code">' + esc(v) + '</b> غير مسجّل. يمكنك تسجيله الآن:' +
+    '<label>اسم الغرفة</label><input id="rdName"><label>الطابق</label><select id="rdF">' + opts(S.boot.floors, ADD.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
+    '<div style="height:8px"></div><button class="btn sm" onclick="regDoor(\'' + esc(v) + '\')">تسجيل الباب</button></div>';
+}
+async function regDoor(code) {
+  const r = await api('apiAddRoom', $('#rdF').value, code, $('#rdName').value);
+  if (!r) return;
+  await refresh();
+  const rm = roomByCode(code);
+  if (rm) pickRoom(rm);
+  toast('تم تسجيل الباب');
+}
+function scanDoor() {
+  scannerUI('قراءة باركود الباب', function (t) {
+    const r = findRoomByScan(t);
+    if (r) { pickRoom(r); toast('تم اختيار: ' + r.name); }
+    else { $('#adDoor').value = cleanDoor(parseCode(t)); doorDone(); toast('هذا الباب غير مسجّل', true); }
+  }, {});
+}
+function adType(sel) { $('#adNewT').style.display = sel.value === '__new__' ? 'block' : 'none'; }
+function adMaker(sel) { $('#adNewM').style.display = sel.value === '__new__' ? 'block' : 'none'; }
+async function saveType() {
+  adSync();
+  const n = $('#ntName').value.trim();
+  const r = await api('apiAddType', ADD.kind, n);
+  if (!r) return;
+  await refresh();
+  ADD.type = n; renderAdd(); toast('تمت إضافة النوع');
+}
+async function saveMaker() {
+  adSync();
+  const n = $('#nmName').value.trim();
+  const r = await api('apiAddMaker', n);
+  if (!r) return;
+  await refresh();
+  ADD.maker = n; renderAdd(); toast('تمت إضافة الشركة');
+}
+function scanSerial() {
+  const dev = ADD.kind === 'جهاز';
+  scannerUI(dev ? 'قراءة الرقم التسلسلي' : 'قراءة رمز الأصل', function (t) {
+    $('#adS').value = parseCode(t); ADD.viaScan = true; adCheck();
   }, { ocr: dev });
 }
-async function doLookup() {
-  const raw = $('#lkQ').value.trim();
-  if (!raw) { toast('أدخل الرقم التسلسلي أو الرمز', true); return; }
+const CHK = { q: null, p: null };
+function adCheck() {
+  const inp = $('#adS');
+  if (!inp) return Promise.resolve();
+  const raw = inp.value.trim(), box = $('#adSChk');
+  if (!raw) { CHK.q = null; CHK.p = null; ADD.found = null; $('#adFound').innerHTML = ''; box.textContent = ''; return Promise.resolve(); }
   const q = parseCode(raw);
-  const r = await api('apiLookup', q);
-  if (!r) return;
-  if (r.found) {
-    $('#newForm').style.display = 'none';
-    renderFound(r.asset);
-  } else {
-    $('#lkRes').innerHTML = '<div class="warnbox">غير مسجّل في النظام. أكمل البيانات أدناه لإنشائه كأصل جديد.</div>';
-    openNewForm(q);
-  }
+  if (CHK.q === q && CHK.p) return CHK.p;
+  CHK.q = q; ADD.found = null; $('#adFound').innerHTML = '';
+  box.innerHTML = '<span class="mut">جارٍ الفحص…</span>';
+  CHK.p = (async function () {
+    try {
+      const r = await callRaw('apiLookup', S.token, q);
+      if (CHK.q !== q || !$('#adSChk')) return;
+      if (r.found) {
+        $('#adSChk').innerHTML = '<span style="color:var(--warn)">مسجّل مسبقاً — لا يمكن إنشاء رمز جديد له</span>';
+        ADD.found = r.asset; renderFound(r.asset);
+      } else {
+        $('#adSChk').innerHTML = '<span style="color:var(--ok)">غير مسجّل — جاهز للحفظ</span>';
+      }
+    } catch (e) { CHK.q = null; CHK.p = null; fail(e); }
+  })();
+  return CHK.p;
 }
 function kvRow(l, v) { return '<div class="kv"><span>' + l + '</span><span>' + v + '</span></div>'; }
 function renderFound(a) {
-  S.found = a;
-  const p = S.curP, b = S.boot, here = a.floor === p.floor && a.room === p.room;
+  S.found = a; ADD.found = a;
+  const b = S.boot, here = a.room === ADD.room;
   const hist = (a.moves || []).slice(0, 5).map(function (m) {
     return '<div class="kv"><span>' + esc(m.time) + '</span><span style="text-align:left">' + esc(m.action) + ' — ' + esc(m.user) + '</span></div>';
   }).join('');
-  $('#lkRes').innerHTML = '<div class="warnbox">الأصل مسجّل مسبقاً، فلا حاجة لإنشاء رمز جديد.</div>' +
+  $('#adFound').innerHTML = '<div class="warnbox" style="margin-top:10px">الأصل مسجّل مسبقاً، فلا حاجة لإنشاء رمز جديد.</div>' +
     '<div style="border:1px solid var(--bd);border-radius:10px;padding:10px">' +
     '<p style="margin:0;font-weight:600;font-size:16px">' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + '</p>' +
     '<p class="mut" style="margin:0 0 6px">' + esc(a.model) + '</p>' + badge(a.status) +
     '<p class="code" style="text-align:center;font-weight:600;margin:10px 0 4px">' + esc(a.code) + '</p>' +
     kvRow('الفئة', esc(a.kind)) +
     (a.serial ? kvRow('الرقم التسلسلي', '<span class="code">' + esc(a.serial) + '</span>') : '') +
-    kvRow('الموقع الحالي', esc(a.floorName) + ' — ' + esc(a.roomName) + (here ? ' (هذه الغرفة)' : '')) +
+    kvRow('الموقع الحالي', esc(a.floorName) + ' — ' + esc(a.roomName) + (here ? ' (الغرفة المختارة)' : '')) +
     kvRow('العهدة الحالية', esc(a.holder || 'غير مسحوب')) +
     kvRow('سجّله', esc(a.createdBy) + ' — ' + esc(a.createdAt)) +
     kvRow('آخر طباعة للملصق', esc(a.printedAt || 'لم يُطبع')) +
     (a.notes ? kvRow('ملاحظات', esc(a.notes)) : '') +
     '<h3 style="margin:12px 0 4px">آخر الحركات</h3>' + (hist || '<p class="mut">لا توجد حركات</p>') +
-    '<h3 style="margin:12px 0 0">تعديل الموقع</h3>' +
-    '<label>الطابق</label><select id="fmF" onchange="fillRooms(\'fmF\',\'fmR\',false)">' + opts(b.floors, p.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
+    '<h3 style="margin:12px 0 0">تعديل الموقع (الرمز يبقى كما هو)</h3>' +
+    '<label>الطابق</label><select id="fmF" onchange="fillRooms(\'fmF\',\'fmR\',false)">' + opts(b.floors, ADD.floor || a.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
     '<label>الغرفة</label><select id="fmR"></select>' +
     '<label>ملاحظة (اختياري)</label><input id="fmN">' +
     '<div style="height:8px"></div><button class="btn primary" onclick="doMoveFound()">حفظ الموقع</button>' +
-    '<p class="mut" style="margin:6px 0 0">الرمز يبقى كما هو، ويتغير الموقع فقط.</p>' +
     '<div style="height:8px"></div><button class="btn" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})">فتح البطاقة الكاملة</button></div>';
-  fillRooms('fmF', 'fmR', false, p.room);
+  fillRooms('fmF', 'fmR', false, ADD.room || a.room);
 }
 async function doMoveFound() {
   const a = S.found;
@@ -387,39 +478,33 @@ async function doMoveFound() {
   renderFound(r);
   toast('تم تغيير الموقع، والرمز لم يتغير');
 }
-async function saveType() {
-  const p = S.curP, draft = formDraft(), lk = $('#lkQ').value;
-  const n = $('#ntName').value.trim();
-  const r = await api('apiAddType', p.kind, n, $('#ntCode').value);
-  if (!r) return;
-  await refresh();
-  show('addAsset', { kind: p.kind, floor: p.floor, room: p.room, draft: draft, lookup: lk, formOpen: true, preType: n, preMaker: p.kind === 'جهاز' ? $('#fMaker').value : '' });
-}
-async function saveMaker() {
-  const p = S.curP, draft = formDraft(), lk = $('#lkQ').value;
-  const n = $('#nmName').value.trim();
-  const r = await api('apiAddMaker', n);
-  if (!r) return;
-  await refresh();
-  show('addAsset', { kind: p.kind, floor: p.floor, room: p.room, draft: draft, lookup: lk, formOpen: true, preType: $('#fType').value, preMaker: n });
-}
-function scanSerial() {
-  scannerUI('قراءة الرقم التسلسلي', function (t) { $('#fSerial').value = String(t).trim(); toast('تمت القراءة، راجع الرقم'); }, { ocr: true });
-}
-async function saveAsset() {
-  const p = S.curP, dev = p.kind === 'جهاز', g = function (id) { const e = $('#' + id); return e ? e.value.trim() : ''; };
-  const o = { kind: p.kind, floor: p.floor, room: p.room, type: g('fType'), maker: dev ? g('fMaker') : '', model: g('fModel'), serial: dev ? g('fSerial') : '', status: g('fStatus'), notes: g('fNotes'), qty: dev ? 1 : Number(g('fQty') || 1) };
-  if (!o.type || o.type === '__new__') { toast('اختر النوع', true); return; }
-  if (dev && (!o.maker || o.maker === '__new__')) { toast('اختر الشركة المصنّعة', true); return; }
+async function adSave() {
+  adSync();
+  const dev = ADD.kind === 'جهاز';
+  if (dev && ADD.serial.trim()) await adCheck();
+  if (!ADD.room) { toast('اختر الغرفة أو اكتب رمز الباب', true); return; }
+  if (!ADD.type) { toast('اختر النوع', true); return; }
+  if (dev && !ADD.maker) { toast('اختر الشركة المصنّعة', true); return; }
+  if (ADD.found && dev) { toast('هذا الرقم التسلسلي مسجّل مسبقاً', true); return; }
+  const o = { kind: ADD.kind, floor: ADD.floor, room: ADD.room, type: ADD.type, maker: dev ? ADD.maker : '', model: ADD.model.trim(), serial: dev ? ADD.serial.trim() : '', status: ADD.status, notes: ADD.notes.trim(), qty: dev ? 1 : Number(ADD.qty || 1) };
   const r = await api('apiAddAsset', o);
   if (!r) return;
-  await refresh();
-  page('تم الحفظ',
-    '<div class="ok-box">تمت إضافة ' + r.codes.length + ' أصل بالرموز التالية:</div><div class="card">' +
-    r.codes.slice(0, 30).map(function (c) { return '<p class="code" style="margin:2px 0">' + esc(c) + '</p>'; }).join('') +
-    (r.codes.length > 30 ? '<p class="mut">و ' + (r.codes.length - 30) + ' آخر</p>' : '') + '</div>' +
-    '<div class="grid2"><button class="btn primary" onclick="show(\'addAsset\',{kind:\'' + esc(p.kind) + '\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة آخر</button>' +
-    '<button class="btn" onclick="back()">العودة للغرفة</button></div>', true);
+  ADD.n += r.codes.length; CHK.q = null; CHK.p = null;
+  const wasScan = ADD.viaScan;
+  ADD.serial = ''; ADD.notes = ''; ADD.found = null;
+  callRaw('apiBoot', S.token).then(function (bb) { S.boot = bb; S.user = bb.user; }).catch(function () {});
+  const s = $('#adS'), n = $('#adN');
+  if (s) s.value = '';
+  if (n) n.value = '';
+  $('#adFound').innerHTML = ''; $('#adSChk').textContent = '';
+  $('#adMsg').innerHTML = '<div class="ok-box"><b>تم الحفظ</b>' +
+    r.codes.slice(0, 5).map(function (c) { return '<p class="code" style="margin:4px 0;font-size:16px;font-weight:600">' + esc(c) + '</p>'; }).join('') +
+    (r.codes.length > 5 ? '<small>و ' + (r.codes.length - 5) + ' آخر</small><br>' : '') +
+    '<small>المسجّل في هذه الجلسة: ' + ADD.n + '</small></div>';
+  toast('تم الحفظ: \u2066' + r.codes[0] + '\u2069');
+  if (s) { s.scrollIntoView({ block: 'center' }); }
+  if (dev && wasScan) setTimeout(scanSerial, 500);
+  else if (s && dev) s.focus();
 }
 
 /* ---------- بطاقة الأصل ---------- */
@@ -466,12 +551,124 @@ async function act(action, data) {
   toast('تم: ' + action);
 }
 
+/* ---------- تقرير الأصول ---------- */
+const RP = { rows: [], view: [], sort: 'floor', dir: 1, group: '', f: { floor: '', room: '', kind: '', type: '', status: '', hold: '', q: '' } };
+const RP_COLS = [['code', 'الرمز'], ['type', 'النوع'], ['maker', 'الشركة'], ['serial', 'الرقم التسلسلي'], ['floor', 'الطابق'], ['door', 'الباب'], ['roomName', 'الغرفة'], ['status', 'الحالة'], ['holder', 'العهدة']];
+views.report = async function () {
+  const r = await api('apiReport');
+  if (!r) return;
+  RP.rows = r;
+  renderReport();
+};
+function floorIdx(code) { const i = S.boot.floors.findIndex(function (f) { return f.code === code; }); return i < 0 ? 999 : i; }
+function rpVal(a, k) {
+  if (k === 'floor') return floorIdx(a.floor);
+  if (k === 'door') return a.room;
+  return a[k] || '';
+}
+function rpCmp(a, b, k) {
+  const x = rpVal(a, k), y = rpVal(b, k);
+  if (typeof x === 'number' && typeof y === 'number') return x - y;
+  return String(x).localeCompare(String(y), 'ar', { numeric: true });
+}
+function rpRoomOpts() {
+  const rs = S.boot.rooms.filter(function (r) { return !RP.f.floor || r.floor === RP.f.floor; });
+  return '<option value="">الكل</option>' + opts(rs, RP.f.room, function (r) { return r.code; }, function (r) { return r.name; });
+}
+function renderReport() {
+  const b = S.boot, f = RP.f, types = [];
+  RP.rows.forEach(function (a) { if (types.indexOf(a.type) < 0) types.push(a.type); });
+  const all = function (arr, sel, gv, gl) { return '<option value="">الكل</option>' + opts(arr, sel, gv, gl); };
+  page('تقرير الأصول',
+    '<div class="card noprint"><div class="grid2" style="margin:0">' +
+    '<div><label style="margin-top:0">الطابق</label><select id="rpF" onchange="rpFloor()">' + all(b.floors, f.floor, function (x) { return x.code; }, function (x) { return x.name; }) + '</select></div>' +
+    '<div><label style="margin-top:0">الغرفة</label><select id="rpR" onchange="rpFilter()">' + rpRoomOpts() + '</select></div>' +
+    '<div><label>الفئة</label><select id="rpK" onchange="rpFilter()">' + all(['جهاز', 'أثاث'], f.kind) + '</select></div>' +
+    '<div><label>النوع</label><select id="rpT" onchange="rpFilter()">' + all(types, f.type) + '</select></div>' +
+    '<div><label>الحالة</label><select id="rpS" onchange="rpFilter()">' + all(b.statuses, f.status) + '</select></div>' +
+    '<div><label>العهدة</label><select id="rpH" onchange="rpFilter()"><option value="">الكل</option><option value="1"' + (f.hold === '1' ? ' selected' : '') + '>بعهدة</option><option value="0"' + (f.hold === '0' ? ' selected' : '') + '>غير مسحوب</option></select></div>' +
+    '<div><label>تجميع حسب</label><select id="rpG" onchange="rpFilter()"><option value="">بلا تجميع</option><option value="floor"' + (RP.group === 'floor' ? ' selected' : '') + '>الطابق</option><option value="room"' + (RP.group === 'room' ? ' selected' : '') + '>الغرفة (الباب)</option></select></div>' +
+    '<div><label>بحث</label><input id="rpQ" value="' + esc(f.q) + '" oninput="rpFilter()" placeholder="رمز، رقم تسلسلي، موديل…"></div></div>' +
+    '<div style="height:10px"></div><div class="grid2" style="margin:0"><button class="btn sm" onclick="rpCsv()">تحميل Excel (CSV)</button><button class="btn sm" onclick="window.print()">طباعة / PDF</button></div></div>' +
+    '<div id="rpSum" class="mut" style="margin:0 0 8px"></div><div class="tblw" id="rpOut"></div>', false, true);
+  rpDraw();
+}
+function rpFloor() { RP.f.floor = $('#rpF').value; RP.f.room = ''; $('#rpR').innerHTML = rpRoomOpts(); rpFilter(); }
+function rpFilter() {
+  const g = function (id) { return $('#' + id).value; };
+  RP.f = { floor: g('rpF'), room: g('rpR'), kind: g('rpK'), type: g('rpT'), status: g('rpS'), hold: g('rpH'), q: g('rpQ').trim() };
+  RP.group = g('rpG');
+  rpDraw();
+}
+function rpSort(k) {
+  if (RP.sort === k) RP.dir = -RP.dir; else { RP.sort = k; RP.dir = 1; }
+  rpDraw();
+}
+function rpDraw() {
+  const f = RP.f, q = f.q.toLowerCase();
+  let rows = RP.rows.filter(function (a) {
+    if (f.floor && a.floor !== f.floor) return false;
+    if (f.room && a.room !== f.room) return false;
+    if (f.kind && a.kind !== f.kind) return false;
+    if (f.type && a.type !== f.type) return false;
+    if (f.status && a.status !== f.status) return false;
+    if (f.hold === '1' && !a.holder) return false;
+    if (f.hold === '0' && a.holder) return false;
+    if (q && [a.code, a.serial, a.model, a.maker, a.type, a.roomName, a.room].join(' ').toLowerCase().indexOf(q) < 0) return false;
+    return true;
+  });
+  const gk = RP.group;
+  rows.sort(function (a, b) {
+    let c = 0;
+    if (gk === 'floor') c = floorIdx(a.floor) - floorIdx(b.floor);
+    else if (gk === 'room') c = (floorIdx(a.floor) - floorIdx(b.floor)) || String(a.room).localeCompare(String(b.room), 'ar', { numeric: true });
+    if (c) return c;
+    c = rpCmp(a, b, RP.sort) * RP.dir;
+    return c || String(a.code).localeCompare(String(b.code), 'en', { numeric: true });
+  });
+  RP.view = rows;
+  const cnt = {};
+  rows.forEach(function (a) { cnt[a.type] = (cnt[a.type] || 0) + 1; });
+  $('#rpSum').innerHTML = '<b>' + rows.length + '</b> أصل من ' + RP.rows.length + (rows.length ? ' — ' + Object.keys(cnt).map(function (t) { return esc(t) + ': ' + cnt[t]; }).join('، ') : '');
+  if (!rows.length) { $('#rpOut').innerHTML = '<p class="mut" style="padding:12px">لا توجد أصول مطابقة.</p>'; return; }
+  let h = '<table class="rp"><thead><tr>' + RP_COLS.map(function (c) {
+    return '<th onclick="rpSort(\'' + c[0] + '\')">' + c[1] + (RP.sort === c[0] ? (RP.dir > 0 ? ' ▲' : ' ▼') : '') + '</th>';
+  }).join('') + '</tr></thead><tbody>';
+  let lastG = null;
+  rows.forEach(function (a) {
+    if (gk) {
+      const key = gk === 'floor' ? a.floor : a.room;
+      if (key !== lastG) {
+        lastG = key;
+        const n = rows.filter(function (x) { return (gk === 'floor' ? x.floor : x.room) === key; }).length;
+        h += '<tr class="gh"><td colspan="' + RP_COLS.length + '">' + (gk === 'floor' ? esc(a.floorName) : esc(a.roomName) + ' <span class="code">(' + esc(a.room) + ')</span> — ' + esc(a.floorName)) + ' — ' + n + ' أصل</td></tr>';
+      }
+    }
+    h += '<tr class="clk" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})">' +
+      '<td class="code">' + esc(a.code) + '</td><td>' + esc(a.type) + '</td><td>' + esc(a.maker) + '</td><td class="code">' + esc(a.serial) + '</td>' +
+      '<td>' + esc(a.floorName) + '</td><td class="code">' + esc(a.room) + '</td><td>' + esc(a.roomName) + '</td><td>' + badge(a.status) + '</td><td>' + esc(a.holder) + '</td></tr>';
+  });
+  $('#rpOut').innerHTML = h + '</tbody></table>';
+}
+function rpCsv() {
+  const head = ['الرمز', 'الفئة', 'النوع', 'الشركة', 'الموديل', 'الرقم التسلسلي', 'الطابق', 'رمز الباب', 'الغرفة', 'الحالة', 'العهدة', 'تاريخ الإضافة'];
+  const q = function (v) { return '"' + String(v == null ? '' : v).replace(/"/g, '""') + '"'; };
+  const lines = [head.map(q).join(',')].concat(RP.view.map(function (a) {
+    return [a.code, a.kind, a.type, a.maker, a.model, a.serial, a.floorName, a.room, a.roomName, a.status, a.holder, a.createdAt].map(q).join(',');
+  }));
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = 'assets-report.csv';
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 4000);
+}
+
 /* ---------- المسح ---------- */
 views.scan = function () {
   page('مسح رمز',
     '<div class="card"><button class="btn primary" onclick="liveScan()">الكاميرا المباشرة</button><div style="height:8px"></div>' +
     '<label style="margin-top:0">أو التقط صورة للرمز</label><input type="file" accept="image/*" capture="environment" onchange="photoScan(this)">' +
-    '<label>أو اكتب الرمز يدوياً</label><div class="row"><input id="mc" dir="ltr" placeholder="SH-MN-1-A12-PC01"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">فتح</button></div></div>');
+    '<label>أو اكتب الرمز يدوياً</label><div class="row"><input id="mc" dir="ltr" placeholder="SH-MN-A12-01-001"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">فتح</button></div></div>');
   setTimeout(liveScan, 250);
 };
 function openCode(t) {
