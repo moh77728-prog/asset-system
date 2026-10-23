@@ -57,6 +57,8 @@ summary{cursor:pointer;font-weight:600}
 #toast{position:fixed;bottom:16px;left:50%;transform:translateX(-50%);background:#1b2430;color:#fff;padding:10px 16px;border-radius:10px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:50;max-width:90%;text-align:center}
 #toast.show{opacity:1}
 #toast.err{background:var(--bad)}
+#pbar{position:fixed;top:0;left:0;right:0;height:3px;background:linear-gradient(90deg,transparent,var(--pri),transparent);background-size:50% 100%;background-repeat:no-repeat;animation:pb 1s linear infinite;z-index:60;display:none}
+@keyframes pb{from{background-position:-50% 0}to{background-position:150% 0}}
 #busy{position:fixed;inset:0;background:rgba(255,255,255,.6);display:none;align-items:center;justify-content:center;z-index:40}
 .spin{width:36px;height:36px;border:4px solid var(--bd);border-top-color:var(--pri);border-radius:50%;animation:sp 1s linear infinite}
 @keyframes sp{to{transform:rotate(360deg)}}
@@ -69,14 +71,13 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 .ok-box{background:var(--ok2);color:var(--ok);border-radius:10px;padding:10px;margin:0 0 10px}
 .warnbox{background:var(--warn2);color:var(--warn);border-radius:10px;padding:10px;margin:0 0 10px}
 </style>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
+<script defer src="https://cdnjs.cloudflare.com/ajax/libs/jsbarcode/3.11.6/JsBarcode.all.min.js"></script>
 </head>
 <body>
 <div id="app"></div>
 <div id="toast"></div>
+<div id="pbar"></div>
 <div id="busy"><div class="spin"></div></div>
 <div id="ov"></div>
 
@@ -84,7 +85,7 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 /* الصق هنا رابط Apps Script المنشور (ينتهي بـ /exec) بين علامتي الاقتباس */
 const API_URL = 'https://script.google.com/macros/s/AKfycbxADQOlh3G90s6mgoHq-Wd5HW3cwnboR9s6avWBKuI_g0WO_Sj9uNEJyJAe7y9TexKBZA/exec';
 const INITIAL_ID = (new URLSearchParams(location.search).get('id') || '').replace(/[^A-Za-z0-9\-]/g, '').slice(0, 60);
-const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] } };
+const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] }, idx: { by: {}, ser: {} }, bootAt: 0, lastErr: '' };
 const views = {};
 const $ = function (s, r) { return (r || document).querySelector(s); };
 const esc = function (s) {
@@ -92,6 +93,7 @@ const esc = function (s) {
     return { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c];
   });
 };
+
 
 /* ---------- اتصال بالخادم ---------- */
 function callRaw(fn) {
@@ -116,26 +118,107 @@ function toast(m, err) {
   toast.t = setTimeout(function () { t.className = ''; }, 3500);
 }
 function busy(on) { $('#busy').style.display = on ? 'flex' : 'none'; }
+let PB = 0;
+function pbar(on) { PB = Math.max(0, PB + (on ? 1 : -1)); $('#pbar').style.display = PB ? 'block' : 'none'; }
 function fail(e) {
   let m = String((e && e.message) || e).replace(/^Error:\s*/, '');
   if (/Failed to fetch|NetworkError|Load failed|Unexpected token|JSON/i.test(m)) m = 'تعذّر الاتصال بالخادم. تحقق من الإنترنت ومن رابط Apps Script ومن إعداد الوصول (أي شخص).';
+  S.lastErr = m;
   if (m.indexOf('AUTH') >= 0) { logout(true); return; }
   toast(m, true);
 }
+/* طلب يحجب الشاشة (للحفظ والتعديل) */
 async function api(fn) {
   const args = Array.prototype.slice.call(arguments, 1);
+  S.lastErr = '';
   busy(true);
   try { return await callRaw.apply(null, [fn, S.token].concat(args)); }
   catch (e) { fail(e); return null; }
   finally { busy(false); }
 }
-async function refresh() {
-  const b = await api('apiBoot');
-  if (b) { S.boot = b; S.user = b.user; }
+/* طلب هادئ لا يحجب الشاشة (للقراءة في الخلفية) */
+async function apiQ(fn) {
+  const args = Array.prototype.slice.call(arguments, 1);
+  S.lastErr = '';
+  pbar(true);
+  try { return await callRaw.apply(null, [fn, S.token].concat(args)); }
+  catch (e) { fail(e); return null; }
+  finally { pbar(false); }
+}
+
+/* ---------- البيانات المحلية (للسرعة) ---------- */
+function normKey(s) {
+  let t = String(s == null ? '' : s).trim().toUpperCase();
+  t = t.replace(/^(S\/N|S\.N\.?|SN|SERIAL(\s*(NO\.?|NUMBER|#))?)\s*[:#\-\s]+\s*/, '');
+  return t.replace(/[^A-Z0-9]/g, '');
+}
+function normKeys(s) {
+  const k = normKey(s);
+  if (!k) return [];
+  const k2 = k.replace(/^0+/, '');
+  return (k2 && k2 !== k && k2.length >= 5) ? [k, k2] : [k];
+}
+function cleanCode(s, n) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, n); }
+function setBoot(b) { S.boot = b; S.user = b.user; S.bootAt = Date.now(); reindex(); try { localStorage.setItem('aq_boot', JSON.stringify(b)); } catch (e) {} }
+function reindex() {
+  const by = {}, ser = {};
+  (S.boot.assets || []).forEach(function (a) {
+    by[String(a.code).toUpperCase()] = a;
+    normKeys(a.serial).forEach(function (k) { (ser[k] = ser[k] || []).push(a); });
+  });
+  S.idx = { by: by, ser: ser };
+}
+function upsertAsset(v) {
+  const x = {}; Object.keys(v).forEach(function (k) { if (k !== 'moves') x[k] = v[k]; });
+  const L = S.boot.assets, i = L.findIndex(function (a) { return a.code === x.code; });
+  if (i >= 0) L[i] = x; else L.push(x);
+  reindex();
+}
+function stats() {
+  const L = S.boot.assets;
+  return {
+    total: L.length,
+    custody: L.filter(function (a) { return a.holder; }).length,
+    maint: L.filter(function (a) { return a.status === 'يحتاج صيانة'; }).length,
+    unprinted: L.filter(function (a) { return !a.printedAt; }).length
+  };
+}
+function roomCount(code) { return S.boot.assets.filter(function (a) { return a.room === code; }).length; }
+/* بحث محلي: رمز كامل، ثم رقم تسلسلي (مطابقة ذكية)، مع اقتراحات مشابهة */
+function localFind(raw) {
+  const out = { asset: null, dups: [], similar: [] }, q = String(raw || '').trim();
+  if (!q) return out;
+  const c = S.idx.by[parseCode(q).toUpperCase()];
+  if (c) { out.asset = c; out.byCode = true; return out; }
+  const keys = normKeys(q), seen = {};
+  keys.forEach(function (k) {
+    (S.idx.ser[k] || []).forEach(function (a) { if (!seen[a.code]) { seen[a.code] = 1; out.dups.push(a); } });
+  });
+  if (out.dups.length) { out.asset = out.dups[0]; return out; }
+  const k0 = keys[0];
+  if (k0 && k0.length >= 6) {
+    S.boot.assets.forEach(function (a) {
+      if (out.similar.length >= 5 || !a.serial) return;
+      const k = normKey(a.serial);
+      if (k.length >= 6 && (k.indexOf(k0) >= 0 || k0.indexOf(k) >= 0)) out.similar.push(a);
+    });
+  }
+  return out;
+}
+async function refresh(quiet) {
+  const b = quiet ? await apiQ('apiBoot') : await api('apiBoot');
+  if (b) setBoot(b);
   return b;
 }
+async function bgRefresh() {
+  try { const b = await callRaw('apiBoot', S.token); setBoot(b); if (S.cur === 'home') show('home'); } catch (e) { if (String(e && e.message).indexOf('AUTH') >= 0) logout(true); }
+}
+document.addEventListener('visibilitychange', function () {
+  if (!document.hidden && S.token && S.boot && Date.now() - S.bootAt > 120000) bgRefresh();
+});
 function saveTok(t) { try { if (t) localStorage.setItem('aq_tok', t); else localStorage.removeItem('aq_tok'); } catch (e) {} }
 function loadTok() { try { return localStorage.getItem('aq_tok'); } catch (e) { return null; } }
+
 
 /* ---------- التنقل ---------- */
 function show(name, p) { S.cur = name; S.curP = p; return views[name](p); }
@@ -143,7 +226,7 @@ function go(name, p) { S.stack.push({ name: S.cur, p: S.curP }); return show(nam
 function back() { const x = S.stack.pop(); if (x && x.name) show(x.name, x.p); else home(); }
 function home() { S.stack = []; show('home'); }
 function logout(expired) {
-  saveTok(null); S.token = null; S.stack = [];
+  saveTok(null); try { localStorage.removeItem('aq_boot'); } catch (e) {} S.token = null; S.stack = [];
   show('login');
   if (expired) toast('انتهت الجلسة، سجّل الدخول من جديد', true);
 }
@@ -178,6 +261,7 @@ function parseCode(t) {
   return String(t).trim();
 }
 
+
 /* ---------- الدخول ---------- */
 views.login = function () {
   $('#app').innerHTML = '<div class="wrap" style="padding-top:48px"><div class="card"><h2 style="margin:0 0 2px">إدارة الأصول الحكومية</h2><p class="sub">مدرسة موسى بن نصير</p>' +
@@ -191,14 +275,12 @@ async function doLogin() {
   busy(true);
   try {
     const r = await callRaw('apiLogin', u, p);
-    S.token = r.token; S.user = r.user; saveTok(r.token);
+    S.token = r.token; saveTok(r.token); setBoot(r.boot);
   } catch (e) { busy(false); fail(e); return; }
   busy(false);
-  await start();
+  start();
 }
-async function start() {
-  const b = await refresh();
-  if (!b) return;
+function start() {
   S.stack = [];
   if (INITIAL_ID && !start.done) {
     start.done = true;
@@ -209,7 +291,7 @@ async function start() {
 
 /* ---------- الرئيسية ---------- */
 views.home = function () {
-  const b = S.boot, st = b.stats;
+  const b = S.boot, st = stats();
   page(b.settings.appName,
     '<p class="sub">' + esc(b.settings.schoolName) + ' — ' + esc(S.user.name) + '</p>' +
     '<div class="grid2"><div class="mc"><span>إجمالي الأصول</span><b>' + st.total + '</b></div>' +
@@ -222,18 +304,31 @@ views.home = function () {
     '<button class="btn" onclick="go(\'rooms\')">الغرف والأصول</button>' +
     '<button class="btn" onclick="go(\'export\')">تصدير الملصقات</button>' +
     '<button class="btn" onclick="logout()">تسجيل الخروج</button></div>' +
-    '<div class="card"><label style="margin-top:0">بحث بالرمز أو الرقم التسلسلي أو الموديل</label>' +
+    '<div class="card"><label style="margin-top:0">بحث بالرمز أو الرقم التسلسلي أو الموديل أو اسم الغرفة</label>' +
     '<div class="row"><input id="q" onkeydown="if(event.key===\'Enter\')doSearch()"><button class="btn sm" style="width:auto" onclick="doSearch()">بحث</button></div>' +
-    '<div id="res"></div></div>', true);
+    '<div id="res"></div></div>' +
+    '<p class="mut" style="text-align:center"><a href="#" onclick="doRefresh();return false" style="color:var(--pri)">تحديث البيانات</a></p>', true);
 };
-async function doSearch() {
+async function doRefresh() {
+  const b = await refresh();
+  if (b) { toast('تم تحديث البيانات'); show('home'); }
+}
+function doSearch() {
   const q = $('#q').value.trim();
   if (q.length < 2) { toast('أدخل حرفين على الأقل', true); return; }
-  const r = await api('apiSearch', q);
-  if (!r) return;
-  $('#res').innerHTML = r.length ? r.map(function (a) {
+  const s = q.toLowerCase(), keys = normKeys(q), qd = cleanCode(q, 12);
+  const rooms = S.boot.rooms.filter(function (r) { return r.code === qd || r.name.toLowerCase().indexOf(s) >= 0; }).slice(0, 5);
+  const list = S.boot.assets.filter(function (a) {
+    return [a.code, a.serial, a.model, a.maker, a.type, a.roomName, a.holder].some(function (x) { return String(x || '').toLowerCase().indexOf(s) >= 0; }) ||
+      (keys.length && a.serial && normKeys(a.serial).some(function (k) { return keys.indexOf(k) >= 0; }));
+  }).slice(0, 40);
+  let h = rooms.map(function (r) {
+    return '<div class="item" onclick="go(\'room\',{floor:\'' + esc(r.floor) + '\',room:\'' + esc(r.code) + '\'})"><div><p>' + esc(r.name) + '</p><small>غرفة — ' + roomCount(r.code) + ' أصل</small></div><span class="bd">باب ' + esc(r.code) + '</span></div>';
+  }).join('');
+  h += list.map(function (a) {
     return '<div class="item" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})"><div><p>' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + '</p><small class="code">' + esc(a.code) + '</small></div>' + badge(a.status) + '</div>';
-  }).join('') : '<p class="mut">لا نتائج</p>';
+  }).join('');
+  $('#res').innerHTML = h || '<p class="mut">لا نتائج</p>';
 }
 
 /* ---------- الغرف ---------- */
@@ -244,7 +339,7 @@ views.rooms = function () {
     const rs = b.rooms.filter(function (r) { return r.floor === f.code; });
     h += '<div class="card"><h3>' + esc(f.name) + '</h3>' +
       (rs.length ? rs.map(function (r) {
-        return '<div class="item" onclick="go(\'room\',{floor:\'' + esc(f.code) + '\',room:\'' + esc(r.code) + '\'})"><div><p>' + esc(r.name) + '</p></div><span class="bd">' + r.count + '</span></div>';
+        return '<div class="item" onclick="go(\'room\',{floor:\'' + esc(f.code) + '\',room:\'' + esc(r.code) + '\'})"><div><p>' + esc(r.name) + '</p></div><span class="bd">' + roomCount(r.code) + '</span></div>';
       }).join('') : '<p class="mut">لا توجد غرف</p>') + '</div>';
   });
   if (!b.floors.length) h += '<p class="mut">أضف طابقاً أولاً.</p>';
@@ -256,36 +351,43 @@ views.rooms = function () {
   page('الغرف والأصول', h);
 };
 async function addFloor() {
-  const r = await api('apiAddFloor', $('#nfc').value, $('#nfn').value);
+  const code = $('#nfc').value, name = $('#nfn').value.trim();
+  const r = await api('apiAddFloor', code, name);
   if (!r) return;
-  await refresh(); toast('تمت إضافة الطابق'); show('rooms');
+  S.boot.floors.push({ code: cleanCode(code, 4), name: name });
+  toast('تمت إضافة الطابق'); show('rooms');
 }
 async function addRoom() {
-  const r = await api('apiAddRoom', $('#nrf').value, $('#nrc').value, $('#nrn').value);
+  const f = $('#nrf').value, code = $('#nrc').value, name = $('#nrn').value.trim();
+  const r = await api('apiAddRoom', f, code, name);
   if (!r) return;
-  await refresh(); toast('تمت إضافة الغرفة'); show('rooms');
+  S.boot.rooms.push({ floor: cleanCode(f, 4), code: cleanCode(code, 12), name: name, count: 0 });
+  toast('تمت إضافة الغرفة'); show('rooms');
 }
 
-views.room = async function (p) {
-  const r = await api('apiRoomAssets', p.floor, p.room);
-  if (!r) return;
-  const dev = r.assets.filter(function (a) { return a.kind === 'جهاز'; });
-  const fur = r.assets.filter(function (a) { return a.kind === 'أثاث'; });
+views.room = function (p) {
+  const b = S.boot, rm = b.rooms.find(function (r) { return r.code === p.room; });
+  const fl = b.floors.find(function (f) { return f.code === (rm ? rm.floor : p.floor); });
+  const floor = rm ? rm.floor : p.floor;
+  const items = b.assets.filter(function (a) { return a.room === p.room; });
+  const dev = items.filter(function (a) { return a.kind === 'جهاز'; });
+  const fur = items.filter(function (a) { return a.kind === 'أثاث'; });
   const list = function (arr, t) {
     return '<div class="card"><h3>' + t + ' (' + arr.length + ')</h3>' + (arr.length ? arr.map(function (a) {
       return '<div class="item" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})"><div><p>' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + (a.holder ? ' <small>(بعهدة ' + esc(a.holder) + ')</small>' : '') + '</p><small class="code">' + esc(a.code) + '</small></div>' + badge(a.status) + '</div>';
     }).join('') : '<p class="mut">لا يوجد</p>') + '</div>';
   };
-  page(r.roomName,
-    '<p class="sub">' + esc(r.floorName) + '</p>' +
-    '<div class="grid2"><button class="btn primary" onclick="openAdd({kind:\'جهاز\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة جهاز</button>' +
-    '<button class="btn primary" onclick="openAdd({kind:\'أثاث\',floor:\'' + esc(p.floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة أثاث</button></div>' +
+  page(rm ? rm.name : p.room,
+    '<p class="sub">' + esc(fl ? fl.name : '') + ' — باب <span class="code">' + esc(p.room) + '</span></p>' +
+    '<div class="grid2"><button class="btn primary" onclick="openAdd({kind:\'جهاز\',floor:\'' + esc(floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة جهاز</button>' +
+    '<button class="btn primary" onclick="openAdd({kind:\'أثاث\',floor:\'' + esc(floor) + '\',room:\'' + esc(p.room) + '\'})">إضافة أثاث</button></div>' +
     list(dev, 'الأجهزة') + list(fur, 'الأثاث'));
 };
 
+
 /* ---------- إضافة أصل ---------- */
-const ADD = { kind: 'جهاز', floor: '', room: '', type: '', maker: '', model: '', status: 'سليم', qty: '1', notes: '', serial: '', n: 0, viaScan: false, found: null };
-function cleanDoor(s) { return String(s || '').toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12); }
+const ADD = { kind: 'جهاز', floor: '', room: '', type: '', maker: '', model: '', status: 'سليم', qty: '1', notes: '', serial: '', n: 0, viaScan: false, found: null, last: [] };
+function cleanDoor(s) { return cleanCode(s, 12); }
 function roomByCode(c) {
   c = cleanDoor(c);
   return c ? S.boot.rooms.find(function (r) { return r.code === c; }) : null;
@@ -299,24 +401,37 @@ function findRoomByScan(t) {
 }
 function adSync() {
   const g = function (id) { const e = $('#' + id); return e ? e.value : null; };
-  const m = { type: 'adT', maker: 'adM', model: 'adModel', status: 'adSt', qty: 'adQty', notes: 'adN', serial: 'adS' };
+  const dev = ADD.kind === 'جهاز';
+  const m = { type: 'adT', maker: 'adM', status: 'adSt', qty: 'adQty', notes: 'adN', serial: 'adS' };
+  m.model = dev ? 'adMod' : 'adModel';
   Object.keys(m).forEach(function (k) { const v = g(m[k]); if (v !== null && v !== '__new__') ADD[k] = v; });
 }
 function openAdd(p) {
   p = p || {};
   if (p.kind) ADD.kind = p.kind;
   if (p.floor) { ADD.floor = p.floor; ADD.room = p.room || ''; }
-  ADD.n = 0; ADD.found = null; ADD.serial = ''; ADD.viaScan = false;
+  ADD.n = 0; ADD.found = null; ADD.serial = p.serial || ''; ADD.viaScan = false;
   go('addAsset');
+  if (p.door) { $('#adDoor').value = cleanDoor(p.door); doorDone(); }
+  if (p.serial) adCheck();
 }
 views.addAsset = function () { renderAdd(); };
+function modelList() {
+  return S.boot.models.filter(function (m) { return m.maker === ADD.maker; }).map(function (m) { return m.model; })
+    .sort(function (a, b) { return a.localeCompare(b, 'en', { numeric: true }); });
+}
+function modelOpts() {
+  if (!ADD.maker) return '<option value="">— اختر الشركة أولاً —</option>';
+  return '<option value="">— اختر —</option>' + opts(modelList(), ADD.model) + '<option value="__new__">+ موديل جديد</option>';
+}
 function renderAdd() {
   const b = S.boot, dev = ADD.kind === 'جهاز', types = dev ? b.devTypes : b.furnTypes;
   if (!b.floors.some(function (f) { return f.code === ADD.floor; })) { ADD.floor = b.floors[0] ? b.floors[0].code : ''; ADD.room = ''; }
   if (ADD.room && !b.rooms.some(function (r) { return r.code === ADD.room && r.floor === ADD.floor; })) ADD.room = '';
   if (!types.some(function (t) { return t.name === ADD.type; })) ADD.type = '';
   if (dev && b.makers.indexOf(ADD.maker) < 0) ADD.maker = '';
-  const seg = function (k) { return '<button class="btn' + (ADD.kind === k ? ' primary' : '') + '" onclick="adKind(\'' + k + '\')">' + (k === 'جهاز' ? 'جهاز' : 'أثاث') + '</button>'; };
+  if (dev && ADD.model && modelList().indexOf(ADD.model) < 0) ADD.model = '';
+  const seg = function (k) { return '<button class="btn' + (ADD.kind === k ? ' primary' : '') + '" onclick="adKind(\'' + k + '\')">' + k + '</button>'; };
   let h = '<div class="grid2" style="margin-bottom:12px">' + seg('جهاز') + seg('أثاث') + '</div>';
   h += '<div class="card"><h3>الموقع</h3><label style="margin-top:0">الطابق</label><select id="adF" onchange="adFloor()">' +
     opts(b.floors, ADD.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
@@ -330,13 +445,14 @@ function renderAdd() {
   if (dev) {
     h += '<label>الشركة المصنّعة</label><select id="adM" onchange="adMaker(this)"><option value="">— اختر —</option>' + opts(b.makers, ADD.maker) + '<option value="__new__">+ شركة جديدة</option></select>' +
       '<div id="adNewM" style="display:none"><label>اسم الشركة</label><input id="nmName" dir="ltr"><div style="height:8px"></div><button class="btn sm" onclick="saveMaker()">حفظ الشركة</button></div>' +
-      '<label>الرقم التسلسلي</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" oninput="ADD.viaScan=false" onchange="adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div>' +
-      '<small id="adSChk" class="mut">صوّر الباركود أو اكتب الرقم، وسيُفحص تلقائياً</small>' +
-      '<label>الموديل (اختياري)</label><input id="adModel" dir="ltr" value="' + esc(ADD.model) + '">';
+      '<label>الموديل (إلزامي)</label><select id="adMod" onchange="adModel(this)">' + modelOpts() + '</select>' +
+      '<div id="adNewMod" style="display:none"><label>اسم الموديل الجديد</label><input id="nmdName" dir="ltr"><div style="height:8px"></div><button class="btn sm" onclick="saveModel()">حفظ الموديل</button></div>' +
+      '<label>الرقم التسلسلي</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" oninput="ADD.viaScan=false;adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div>' +
+      '<small id="adSChk" class="mut">صوّر الباركود أو اكتب الرقم، وسيُفحص فوراً</small>';
   } else {
     h += '<label>الوصف (اختياري)</label><input id="adModel" value="' + esc(ADD.model) + '">' +
       '<label>العدد (رمز مستقل لكل قطعة)</label><input id="adQty" type="number" min="1" max="100" value="' + esc(ADD.qty) + '">' +
-      '<label>تحقق: هل الأثاث مسجّل؟ (رمز الملصق، اختياري)</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" onchange="adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div><small id="adSChk" class="mut"></small>';
+      '<label>تحقق: هل الأثاث مسجّل؟ (رمز الملصق، اختياري)</label><div class="row"><input id="adS" dir="ltr" value="' + esc(ADD.serial) + '" oninput="adCheck()"><button class="btn sm" style="width:auto" onclick="scanSerial()">كاميرا</button></div><small id="adSChk" class="mut"></small>';
   }
   h += '<div id="adFound"></div>' +
     '<label>الحالة</label><select id="adSt">' + opts(b.statuses, ADD.status || 'سليم') + '</select>' +
@@ -345,7 +461,7 @@ function renderAdd() {
     '<div style="height:6px"></div><button class="btn" onclick="home()">إنهاء والعودة للقائمة</button></div>';
   page(dev ? 'إضافة جهاز' : 'إضافة أثاث', h);
   adFillRooms();
-  if (ADD.found) renderFound(ADD.found);
+  if (ADD.serial) adCheck();
 }
 function adFillRooms() {
   const rs = S.boot.rooms.filter(function (r) { return r.floor === ADD.floor; });
@@ -354,7 +470,7 @@ function adFillRooms() {
   }).join('');
   $('#adDoor').value = ADD.room;
 }
-function adKind(k) { adSync(); ADD.kind = k; ADD.type = ''; ADD.serial = ''; ADD.found = null; renderAdd(); }
+function adKind(k) { adSync(); ADD.kind = k; ADD.type = ''; ADD.model = ''; ADD.serial = ''; ADD.found = null; renderAdd(); }
 function adFloor() { ADD.floor = $('#adF').value; ADD.room = ''; $('#adDoorNote').innerHTML = ''; $('#adDoorNote').removeAttribute('data-code'); adFillRooms(); }
 function adRoom() { ADD.room = $('#adR').value; $('#adDoor').value = ADD.room; $('#adDoorNote').innerHTML = ''; $('#adDoorNote').removeAttribute('data-code'); if (ADD.found) renderFound(ADD.found); }
 function pickRoom(r) {
@@ -380,9 +496,10 @@ function doorDone() {
     '<div style="height:8px"></div><button class="btn sm" onclick="regDoor(\'' + esc(v) + '\')">تسجيل الباب</button></div>';
 }
 async function regDoor(code) {
-  const r = await api('apiAddRoom', $('#rdF').value, code, $('#rdName').value);
+  const fl = $('#rdF').value, nm = $('#rdName').value.trim();
+  const r = await api('apiAddRoom', fl, code, nm);
   if (!r) return;
-  await refresh();
+  S.boot.rooms.push({ floor: fl, code: cleanDoor(code), name: nm, count: 0 });
   const rm = roomByCode(code);
   if (rm) pickRoom(rm);
   toast('تم تسجيل الباب');
@@ -395,13 +512,20 @@ function scanDoor() {
   }, {});
 }
 function adType(sel) { $('#adNewT').style.display = sel.value === '__new__' ? 'block' : 'none'; }
-function adMaker(sel) { $('#adNewM').style.display = sel.value === '__new__' ? 'block' : 'none'; }
+function adMaker(sel) {
+  $('#adNewM').style.display = sel.value === '__new__' ? 'block' : 'none';
+  if (sel.value !== '__new__') { ADD.maker = sel.value; ADD.model = ''; $('#adMod').innerHTML = modelOpts(); $('#adNewMod').style.display = 'none'; }
+}
+function adModel(sel) {
+  $('#adNewMod').style.display = sel.value === '__new__' ? 'block' : 'none';
+  if (sel.value !== '__new__') ADD.model = sel.value;
+}
 async function saveType() {
   adSync();
   const n = $('#ntName').value.trim();
   const r = await api('apiAddType', ADD.kind, n);
   if (!r) return;
-  await refresh();
+  (ADD.kind === 'جهاز' ? S.boot.devTypes : S.boot.furnTypes).push({ name: n, code: '' });
   ADD.type = n; renderAdd(); toast('تمت إضافة النوع');
 }
 async function saveMaker() {
@@ -409,47 +533,49 @@ async function saveMaker() {
   const n = $('#nmName').value.trim();
   const r = await api('apiAddMaker', n);
   if (!r) return;
-  await refresh();
-  ADD.maker = n; renderAdd(); toast('تمت إضافة الشركة');
+  S.boot.makers.push(n);
+  ADD.maker = n; ADD.model = ''; renderAdd(); toast('تمت إضافة الشركة');
+}
+async function saveModel() {
+  adSync();
+  const n = $('#nmdName').value.trim();
+  const r = await api('apiAddModel', ADD.maker, n);
+  if (!r) return;
+  S.boot.models.push({ maker: r.maker, model: r.model });
+  ADD.model = r.model; renderAdd(); toast('تمت إضافة الموديل');
 }
 function scanSerial() {
   const dev = ADD.kind === 'جهاز';
   scannerUI(dev ? 'قراءة الرقم التسلسلي' : 'قراءة رمز الأصل', function (t) {
-    $('#adS').value = parseCode(t); ADD.viaScan = true; adCheck();
+    $('#adS').value = parseCode(t); adCheck(); ADD.viaScan = true;
   }, { ocr: dev });
 }
-const CHK = { q: null, p: null };
+function whereOf(a) { return esc(a.roomName) + ' (' + esc(a.floorName) + ')'; }
+/* فحص محلي فوري، بلا اتصال */
 function adCheck() {
   const inp = $('#adS');
-  if (!inp) return Promise.resolve();
-  const raw = inp.value.trim(), box = $('#adSChk');
-  if (!raw) { CHK.q = null; CHK.p = null; ADD.found = null; $('#adFound').innerHTML = ''; box.textContent = ''; return Promise.resolve(); }
-  const q = parseCode(raw);
-  if (CHK.q === q && CHK.p) return CHK.p;
-  CHK.q = q; ADD.found = null; $('#adFound').innerHTML = '';
-  box.innerHTML = '<span class="mut">جارٍ الفحص…</span>';
-  CHK.p = (async function () {
-    try {
-      const r = await callRaw('apiLookup', S.token, q);
-      if (CHK.q !== q || !$('#adSChk')) return;
-      if (r.found) {
-        $('#adSChk').innerHTML = '<span style="color:var(--warn)">مسجّل مسبقاً — لا يمكن إنشاء رمز جديد له</span>';
-        ADD.found = r.asset; renderFound(r.asset);
-      } else {
-        $('#adSChk').innerHTML = '<span style="color:var(--ok)">غير مسجّل — جاهز للحفظ</span>';
-      }
-    } catch (e) { CHK.q = null; CHK.p = null; fail(e); }
-  })();
-  return CHK.p;
+  if (!inp) return;
+  const raw = inp.value.trim(), box = $('#adSChk'), fb = $('#adFound');
+  ADD.serial = inp.value;
+  if (!raw) { ADD.found = null; fb.innerHTML = ''; box.textContent = ''; return; }
+  const r = localFind(raw);
+  if (r.asset) {
+    box.innerHTML = '<span style="color:var(--warn)">مسجّل مسبقاً برمز <span class="code">' + esc(r.asset.code) + '</span> في ' + whereOf(r.asset) + '</span>';
+    ADD.found = r.asset; renderFound(r.asset);
+    return;
+  }
+  ADD.found = null; fb.innerHTML = '';
+  if (r.similar.length) {
+    box.innerHTML = '<span style="color:var(--warn)">لا يوجد تطابق تام، لكن توجد أرقام مشابهة:</span>' + r.similar.map(function (a) {
+      return '<div class="item" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})"><div><small class="code">' + esc(a.serial) + '</small><br><small>' + esc(a.type) + ' — ' + whereOf(a) + '</small></div></div>';
+    }).join('') + '<span style="color:var(--ok)">يمكنك الحفظ إن كان الجهاز مختلفاً.</span>';
+  } else box.innerHTML = '<span style="color:var(--ok)">غير مسجّل — جاهز للحفظ</span>';
 }
 function kvRow(l, v) { return '<div class="kv"><span>' + l + '</span><span>' + v + '</span></div>'; }
 function renderFound(a) {
   S.found = a; ADD.found = a;
   const b = S.boot, here = a.room === ADD.room;
-  const hist = (a.moves || []).slice(0, 5).map(function (m) {
-    return '<div class="kv"><span>' + esc(m.time) + '</span><span style="text-align:left">' + esc(m.action) + ' — ' + esc(m.user) + '</span></div>';
-  }).join('');
-  $('#adFound').innerHTML = '<div class="warnbox" style="margin-top:10px">الأصل مسجّل مسبقاً، فلا حاجة لإنشاء رمز جديد.</div>' +
+  $('#adFound').innerHTML = '<div class="warnbox" style="margin-top:10px">الأصل مسجّل مسبقاً في <b>' + whereOf(a) + '</b>، فلا حاجة لإنشاء رمز جديد.</div>' +
     '<div style="border:1px solid var(--bd);border-radius:10px;padding:10px">' +
     '<p style="margin:0;font-weight:600;font-size:16px">' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + '</p>' +
     '<p class="mut" style="margin:0 0 6px">' + esc(a.model) + '</p>' + badge(a.status) +
@@ -461,7 +587,6 @@ function renderFound(a) {
     kvRow('سجّله', esc(a.createdBy) + ' — ' + esc(a.createdAt)) +
     kvRow('آخر طباعة للملصق', esc(a.printedAt || 'لم يُطبع')) +
     (a.notes ? kvRow('ملاحظات', esc(a.notes)) : '') +
-    '<h3 style="margin:12px 0 4px">آخر الحركات</h3>' + (hist || '<p class="mut">لا توجد حركات</p>') +
     '<h3 style="margin:12px 0 0">تعديل الموقع (الرمز يبقى كما هو)</h3>' +
     '<label>الطابق</label><select id="fmF" onchange="fillRooms(\'fmF\',\'fmR\',false)">' + opts(b.floors, ADD.floor || a.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
     '<label>الغرفة</label><select id="fmR"></select>' +
@@ -474,51 +599,191 @@ async function doMoveFound() {
   const a = S.found;
   const r = await api('apiAction', a.code, 'نقل', { floor: $('#fmF').value, room: $('#fmR').value, note: $('#fmN').value });
   if (!r) return;
-  await refresh();
-  renderFound(r);
+  upsertAsset(r);
+  const n = S.idx.by[a.code.toUpperCase()];
+  renderFound(n); adCheck();
   toast('تم تغيير الموقع، والرمز لم يتغير');
 }
 async function adSave() {
   adSync();
   const dev = ADD.kind === 'جهاز';
-  if (dev && ADD.serial.trim()) await adCheck();
+  if (dev && ADD.serial.trim()) adCheck();
   if (!ADD.room) { toast('اختر الغرفة أو اكتب رمز الباب', true); return; }
   if (!ADD.type) { toast('اختر النوع', true); return; }
   if (dev && !ADD.maker) { toast('اختر الشركة المصنّعة', true); return; }
-  if (ADD.found && dev) { toast('هذا الرقم التسلسلي مسجّل مسبقاً', true); return; }
+  if (dev && !ADD.model) { toast('اختر الموديل، أو أضف موديلاً جديداً', true); return; }
+  if (ADD.found && dev) { toast('هذا الرقم التسلسلي مسجّل مسبقاً في ' + ADD.found.roomName, true); return; }
   const o = { kind: ADD.kind, floor: ADD.floor, room: ADD.room, type: ADD.type, maker: dev ? ADD.maker : '', model: ADD.model.trim(), serial: dev ? ADD.serial.trim() : '', status: ADD.status, notes: ADD.notes.trim(), qty: dev ? 1 : Number(ADD.qty || 1) };
   const r = await api('apiAddAsset', o);
-  if (!r) return;
-  ADD.n += r.codes.length; CHK.q = null; CHK.p = null;
-  const wasScan = ADD.viaScan;
-  ADD.serial = ''; ADD.notes = ''; ADD.found = null;
-  callRaw('apiBoot', S.token).then(function (bb) { S.boot = bb; S.user = bb.user; }).catch(function () {});
-  const s = $('#adS'), n = $('#adN');
-  if (s) s.value = '';
-  if (n) n.value = '';
-  $('#adFound').innerHTML = ''; $('#adSChk').textContent = '';
-  $('#adMsg').innerHTML = '<div class="ok-box"><b>تم الحفظ</b>' +
-    r.codes.slice(0, 5).map(function (c) { return '<p class="code" style="margin:4px 0;font-size:16px;font-weight:600">' + esc(c) + '</p>'; }).join('') +
-    (r.codes.length > 5 ? '<small>و ' + (r.codes.length - 5) + ' آخر</small><br>' : '') +
-    '<small>المسجّل في هذه الجلسة: ' + ADD.n + '</small></div>';
-  toast('تم الحفظ: \u2066' + r.codes[0] + '\u2069');
-  if (s) { s.scrollIntoView({ block: 'center' }); }
-  if (dev && wasScan) setTimeout(scanSerial, 500);
-  else if (s && dev) s.focus();
+  if (!r) {
+    /* قد يكون الرقم مسجّلاً من جهاز آخر: حدّث البيانات بصمت */
+    if (/مسجّل مسبقاً/.test(S.lastErr || '')) refresh(true);
+    return;
+  }
+  r.assets.forEach(upsertAsset);
+  ADD.n += r.codes.length; ADD.last = r.assets; ADD.found = null;
+  show('addDone');
 }
 
-/* ---------- بطاقة الأصل ---------- */
-views.asset = async function (p) {
-  const a = await api('apiAsset', p.code);
-  if (!a) { if (S.stack.length) back(); else home(); return; }
-  renderAsset(a);
+/* ---------- ما بعد الحفظ ---------- */
+views.addDone = function () {
+  const L = ADD.last, a = L[0], dev = ADD.kind === 'جهاز';
+  if (!a) { show('addAsset'); return; }
+  page('تم الحفظ',
+    '<div class="ok-box"><b>تم الحفظ</b>' +
+    L.slice(0, 5).map(function (x) { return '<p class="code" style="margin:4px 0;font-size:16px;font-weight:600">' + esc(x.code) + '</p>'; }).join('') +
+    (L.length > 5 ? '<small>و ' + (L.length - 5) + ' آخر</small><br>' : '') +
+    '<small>' + esc(a.type) + (a.maker ? ' — ' + esc(a.maker) : '') + (a.model ? ' — ' + esc(a.model) : '') + ' | ' + whereOf(a) + '</small><br>' +
+    '<small>المسجّل في هذه الجلسة: ' + ADD.n + '</small></div>' +
+    '<div class="card"><h3>ماذا تريد الآن؟</h3>' +
+    '<button class="btn primary" id="dnPrint" onclick="lblOpen()">طباعة ملصق</button><div style="height:8px"></div>' +
+    '<button class="btn" id="dnSame" onclick="adSimilar()">تسجيل أصل مشابه' + (dev ? ' (تفتح الكاميرا)' : '') + '</button><div style="height:8px"></div>' +
+    '<button class="btn" id="dnDiff" onclick="adDiffSame()">تسجيل أصل مختلف بنفس الغرفة</button><div style="height:8px"></div>' +
+    '<button class="btn" id="dnRoom" onclick="adOtherRoom()">تسجيل أصل في غرفة مختلفة</button><div style="height:8px"></div>' +
+    '<button class="btn" id="dnEnd" onclick="home()">إنهاء</button></div>', true);
 };
-function renderAsset(a) {
-  S.asset = a;
-  const b = S.boot;
-  const hist = (a.moves || []).map(function (m) {
+function adSimilar() {
+  ADD.serial = ''; ADD.notes = ''; ADD.found = null;
+  show('addAsset');
+  if (ADD.kind === 'جهاز') setTimeout(scanSerial, 300);
+}
+function adDiffSame() {
+  ADD.serial = ''; ADD.notes = ''; ADD.found = null; ADD.type = ''; ADD.maker = ''; ADD.model = '';
+  show('addAsset');
+}
+function adOtherRoom() {
+  ADD.serial = ''; ADD.notes = ''; ADD.found = null; ADD.room = '';
+  show('addAsset');
+  const r = $('#adR'); if (r) r.focus();
+}
+
+/* ---------- طباعة الملصق ---------- */
+const LIBS = {
+  jspdf: { ok: function () { return window.jspdf; }, u: ['https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js', 'https://cdn.jsdelivr.net/npm/jspdf@2.5.1/dist/jspdf.umd.min.js'] },
+  jszip: { ok: function () { return window.JSZip; }, u: ['https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js', 'https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js'] }
+};
+async function ensureLib(n) {
+  const L = LIBS[n];
+  if (L.ok()) return;
+  for (let i = 0; i < L.u.length; i++) {
+    try { await loadScript(L.u[i]); } catch (e) {}
+    if (L.ok()) return;
+  }
+  throw new Error('تعذّر تحميل مكتبة التصدير. تحقق من الإنترنت.');
+}
+function blobDownload(blob, name) {
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = name;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(function () { URL.revokeObjectURL(url); }, 8000);
+}
+async function markPrinted(codes) {
+  const r = await apiQ('apiMarkPrinted', codes);
+  if (!r) return;
+  const t = new Date().toISOString().slice(0, 16).replace('T', ' ');
+  codes.forEach(function (c) { const a = S.idx.by[String(c).toUpperCase()]; if (a) a.printedAt = t; });
+  toast('سُجّل الملصق كمطبوع');
+}
+function lblOpen() { go('label', { codes: ADD.last.map(function (a) { return a.code; }) }); }
+function lblItems() { return S.lbl.codes.map(function (c) { return S.idx.by[String(c).toUpperCase()]; }).filter(Boolean); }
+views.label = function (p) {
+  S.lbl = { codes: p && p.codes ? p.codes : ADD.last.map(function (a) { return a.code; }) };
+  const st = S.boot.settings, n = S.lbl.codes.length;
+  page('طباعة ملصق',
+    '<div class="card"><h3>' + n + ' ملصق</h3><label style="margin-top:0">نوع الملصق</label><select id="lbM" onchange="lblUpd()"><option value="qr">QR</option><option value="bar">باركود Code 128</option><option value="both">QR وباركود معاً</option></select>' +
+    '<div class="grid2" style="margin:0"><div><label>العرض (مم)</label><input id="lbW" type="number" value="' + esc(st.labelW) + '" oninput="lblUpd()"></div><div><label>الارتفاع (مم)</label><input id="lbH" type="number" value="' + esc(st.labelH) + '" oninput="lblUpd()"></div></div>' +
+    '<p class="mut" id="lbHint"></p><label>معاينة</label><canvas id="lbP" class="pv"></canvas>' +
+    '<div style="height:8px"></div><div class="grid2" style="margin:0"><button class="btn primary" id="lbShare" onclick="lblExport(\'share\')">مشاركة / إرسال إلى تطبيق الطابعة</button><button class="btn" id="lbPng" onclick="lblExport(\'png\')">تحميل PNG</button>' +
+    '<button class="btn" id="lbPdf" onclick="lblExport(\'pdf\')">تحميل PDF</button><button class="btn" id="lbDone" onclick="lblMark()">تم الطباعة</button></div>' +
+    '<p class="mut" id="lbMsg"></p></div>');
+  lblUpd();
+};
+function lblOpts() { return { mode: $('#lbM').value, w: Math.max(20, Number($('#lbW').value) || 50), h: Math.max(15, Number($('#lbH').value) || 30) }; }
+function lblUpd() {
+  const o = lblOpts(), it = lblItems()[0];
+  if (!it) return;
+  const bm = 11 * it.code.length + 35, need = Math.ceil(bm / 4 + 3 + (o.mode === 'both' ? o.h - 1.5 : 0));
+  $('#lbHint').textContent = (o.mode !== 'qr' && o.w < need) ? 'باركود Code 128 لهذا الرمز لا يُقرأ بثقة على ملصق عرضه أقل من ' + need + ' مم. استخدم QR أو ملصقاً أعرض.' : '';
+  const c = drawLabel(it, o.mode, o.w, o.h), pv = $('#lbP');
+  pv.width = c.width; pv.height = c.height;
+  pv.getContext('2d').drawImage(c, 0, 0);
+}
+function canvasBlob(c) { return new Promise(function (res) { c.toBlob(res, 'image/png'); }); }
+async function lblExport(kind) {
+  const items = lblItems(), o = lblOpts(), msg = $('#lbMsg');
+  if (!items.length) return;
+  msg.textContent = 'جارٍ التجهيز…';
+  try {
+    if (kind === 'pdf') {
+      await ensureLib('jspdf');
+      const jsPDF = window.jspdf.jsPDF, ori = o.w >= o.h ? 'l' : 'p';
+      const pdf = new jsPDF({ orientation: ori, unit: 'mm', format: [o.w, o.h] });
+      items.forEach(function (a, i) {
+        if (i > 0) pdf.addPage([o.w, o.h], ori);
+        pdf.addImage(drawLabel(a, o.mode, o.w, o.h).toDataURL('image/png'), 'PNG', 0, 0, o.w, o.h);
+      });
+      blobDownload(pdf.output('blob'), items.length === 1 ? items[0].code + '.pdf' : 'labels.pdf');
+    } else if (kind === 'png' || kind === 'share') {
+      const files = [];
+      for (let i = 0; i < items.length; i++) {
+        const b = await canvasBlob(drawLabel(items[i], o.mode, o.w, o.h));
+        files.push(new File([b], items[i].code + '.png', { type: 'image/png' }));
+      }
+      if (kind === 'share' && navigator.canShare && navigator.canShare({ files: files })) {
+        try { await navigator.share({ files: files, title: 'ملصق ' + items[0].code }); }
+        catch (e) { if (e && e.name === 'AbortError') { msg.textContent = ''; return; } throw e; }
+      } else if (files.length === 1) {
+        blobDownload(files[0], files[0].name);
+        if (kind === 'share') toast('المشاركة غير متاحة في هذا المتصفح، تم التحميل بدلاً منها');
+      } else {
+        await ensureLib('jszip');
+        const zip = new JSZip();
+        files.forEach(function (f) { zip.file(f.name, f); });
+        blobDownload(await zip.generateAsync({ type: 'blob' }), 'labels.zip');
+      }
+    }
+  } catch (e) { msg.textContent = ''; toast('تعذّر تجهيز الملصق: ' + (e.message || e), true); return; }
+  msg.textContent = 'تم. بعد الطباعة اضغط «تم الطباعة» لتسجيلها.';
+  lblMark(true);
+}
+function lblMark(silent) {
+  const codes = lblItems().filter(function (a) { return !a.printedAt; }).map(function (a) { return a.code; });
+  if (!codes.length) { if (!silent) toast('مسجّلة كمطبوعة مسبقاً'); return; }
+  markPrinted(codes);
+}
+
+
+/* ---------- بطاقة الأصل ---------- */
+S.mv = {};
+function histHtml(moves) {
+  const h = (moves || []).map(function (m) {
     return '<div class="kv"><span>' + esc(m.time) + '</span><span style="text-align:left">' + esc(m.action) + ' — ' + esc(m.user) + (m.note ? '<br><small>' + esc(m.note) + '</small>' : '') + '</span></div>';
   }).join('');
+  return h || '<p class="mut">لا توجد حركات</p>';
+}
+views.asset = async function (p) {
+  const code = String(p.code || '').toUpperCase();
+  let a = S.idx.by[code];
+  if (a) {
+    renderAsset(a, S.mv[a.code]);
+    const v = await apiQ('apiAsset', a.code);
+    if (!v || S.cur !== 'asset' || !S.asset || S.asset.code !== a.code) return;
+    S.mv[v.code] = v.moves;
+    const old = JSON.stringify(a);
+    upsertAsset(v);
+    const n = S.idx.by[code];
+    if (JSON.stringify(n) !== old) renderAsset(n, v.moves); else { const e = $('#ahist'); if (e) e.innerHTML = histHtml(v.moves); }
+    return;
+  }
+  const v = await api('apiAsset', p.code);
+  if (!v) { if (S.stack.length) back(); else home(); return; }
+  S.mv[v.code] = v.moves;
+  upsertAsset(v);
+  renderAsset(S.idx.by[String(v.code).toUpperCase()], v.moves);
+};
+function renderAsset(a, moves) {
+  S.asset = a;
+  const b = S.boot;
   const role = (S.user && S.user.role) || '', canAssign = role !== 'قراءة', canTransfer = role === 'مدير' || a.holder === (S.user && S.user.name);
   let assign = '';
   if (canAssign && (!a.holder || canTransfer)) {
@@ -542,17 +807,18 @@ function renderAsset(a) {
     '<div class="kv"><span>الموقع الحالي</span><span>' + esc(a.floorName) + ' — ' + esc(a.roomName) + '</span></div>' +
     '<div class="kv"><span>سجّله</span><span>' + esc(a.createdBy) + ' — ' + esc(a.createdAt) + '</span></div>' +
     '<div class="kv"><span>آخر طباعة للملصق</span><span>' + esc(a.printedAt || 'لم يُطبع') + '</span></div>' +
-    (a.notes ? '<div class="kv"><span>ملاحظات</span><span>' + esc(a.notes) + '</span></div>' : '') + '</div>' +
+    (a.notes ? '<div class="kv"><span>ملاحظات</span><span>' + esc(a.notes) + '</span></div>' : '') +
+    '<div style="height:8px"></div><button class="btn sm" onclick="go(\'label\',{codes:[\'' + esc(a.code) + '\']})">طباعة الملصق</button></div>' +
     '<div class="card"><h3>العهدة</h3>' + holderBox + '</div>' +
     '<details><summary>نقل إلى غرفة أخرى</summary><label>الطابق</label><select id="mf" onchange="fillRooms(\'mf\',\'mr\',false)">' + opts(b.floors, a.floor, function (f) { return f.code; }, function (f) { return f.name; }) + '</select>' +
     '<label>الغرفة</label><select id="mr"></select><label>ملاحظة (اختياري)</label><input id="mn"><div style="height:8px"></div>' +
     '<button class="btn primary" onclick="act(\'نقل\',{floor:$(\'#mf\').value,room:$(\'#mr\').value,note:$(\'#mn\').value})">تأكيد النقل</button></details>' +
     '<details><summary>تغيير الحالة</summary><label>الحالة</label><select id="ms">' + opts(b.statuses, a.status) + '</select><div style="height:8px"></div>' +
     '<button class="btn primary" onclick="act(\'حالة\',{status:$(\'#ms\').value})">حفظ الحالة</button></details>' +
-    '<div class="card"><h3>سجل الحركات</h3>' + (hist || '<p class="mut">لا توجد حركات</p>') + '</div>');
+    '<div class="card"><h3>سجل الحركات</h3><div id="ahist">' + (moves ? histHtml(moves) : '<p class="mut">جارٍ التحميل…</p>') + '</div></div>');
   fillRooms('mf', 'mr', false, a.room);
-  const cv = $('#qrc'), x = cv.getContext('2d');
-  drawQRTo(x, qrUrl(a.code), 0, 0, 240);
+  const cv = $('#qrc');
+  try { drawQRTo(cv.getContext('2d'), qrUrl(a.code), 0, 0, 240); } catch (e) {}
 }
 async function assignTo() {
   let n = $('#hp').value;
@@ -563,29 +829,80 @@ async function assignTo() {
     const r = await api('apiAddPerson', n);
     if (!r) return;
     n = r.name;
+    if (S.boot.people.indexOf(n) < 0) S.boot.people.push(n);
   }
   const a = await api('apiAction', S.asset.code, 'إسناد', { holder: n, note: $('#hn').value });
   if (!a) return;
-  await refresh();
-  renderAsset(a);
+  S.mv[a.code] = a.moves; upsertAsset(a);
+  renderAsset(S.idx.by[String(a.code).toUpperCase()], a.moves);
   toast('تمت العهدة لـ ' + n);
 }
 async function act(action, data) {
   const a = await api('apiAction', S.asset.code, action, data);
   if (!a) return;
-  renderAsset(a);
-  await refresh();
+  S.mv[a.code] = a.moves; upsertAsset(a);
+  renderAsset(S.idx.by[String(a.code).toUpperCase()], a.moves);
   toast('تم: ' + action);
+}
+
+/* ---------- المسح الموحّد ---------- */
+views.scan = function () {
+  page('مسح رمز',
+    '<div class="card"><button class="btn primary" onclick="liveScan()">الكاميرا المباشرة</button><div style="height:8px"></div>' +
+    '<label style="margin-top:0">أو التقط صورة للرمز</label><input type="file" accept="image/*" capture="environment" onchange="photoScan(this)">' +
+    '<label>أو اكتب: رقماً تسلسلياً، أو رمز الأصل الطويل، أو رقم الباب</label><div class="row"><input id="mc" dir="ltr" placeholder="مثال: 105-M12-30510101-001" onkeydown="if(event.key===\'Enter\')openCode($(\'#mc\').value)"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">بحث</button></div></div>' +
+    '<div id="scRes"></div>');
+  setTimeout(liveScan, 250);
+};
+async function openCode(t) {
+  const q = parseCode(t);
+  if (!q) { toast('أدخل الرمز', true); return; }
+  let r = scanResolve(t, q);
+  if (!r.hit && Date.now() - S.bootAt > 15000) { await refresh(true); r = scanResolve(t, q); }
+  if (r.hit === 'asset') { go('asset', { code: r.asset.code }); return; }
+  if (r.hit === 'room') { go('room', { floor: r.room.floor, room: r.room.code }); return; }
+  const host = $('#scRes');
+  if (!host) { toast('غير مسجّل: ' + q, true); return; }
+  if (r.hit === 'many') {
+    host.innerHTML = '<div class="card"><h3>عدة أصول بهذا الرقم</h3>' + r.list.map(function (a) {
+      return '<div class="item" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})"><div><p>' + esc(a.type) + ' — ' + whereOf(a) + '</p><small class="code">' + esc(a.code) + '</small></div></div>';
+    }).join('') + '</div>';
+    return;
+  }
+  const sim = localFind(q).similar;
+  host.innerHTML = '<div class="card"><div class="warnbox"><b class="code">' + esc(q) + '</b> غير مسجّل كرمز أصل ولا كرقم تسلسلي ولا كباب.</div>' +
+    '<button class="btn primary" onclick="openAdd({kind:\'جهاز\',serial:\'' + esc(q) + '\'})">تسجيل جهاز بهذا الرقم التسلسلي</button><div style="height:8px"></div>' +
+    '<button class="btn" onclick="openAdd({kind:\'جهاز\',door:\'' + esc(q) + '\'})">تسجيل باب بهذا الرمز</button>' +
+    (sim.length ? '<h3 style="margin:12px 0 4px">أرقام مشابهة</h3>' + sim.map(function (a) {
+      return '<div class="item" onclick="go(\'asset\',{code:\'' + esc(a.code) + '\'})"><div><small class="code">' + esc(a.serial) + '</small><br><small>' + esc(a.type) + ' — ' + whereOf(a) + '</small></div></div>';
+    }).join('') : '') + '</div>';
+}
+/* الترتيب: رمز الأصل ← رقم تسلسلي ← رقم الباب */
+function scanResolve(t, q) {
+  const f = localFind(q);
+  if (f.byCode) return { hit: 'asset', asset: f.asset };
+  if (f.dups.length === 1) return { hit: 'asset', asset: f.dups[0] };
+  if (f.dups.length > 1) return { hit: 'many', list: f.dups };
+  const rm = findRoomByScan(t);
+  if (rm) return { hit: 'room', room: rm };
+  return { hit: null };
+}
+function liveScan() { scannerUI('مسح QR أو باركود', function (t) { openCode(t); }, {}); }
+async function photoScan(inp) {
+  const f = inp.files && inp.files[0];
+  if (!f) return;
+  busy(true);
+  try { const r = await decodeImageFile(f); busy(false); openCode(r.text); }
+  catch (e) { busy(false); toast('تعذّرت قراءة الصورة. قرّب الباركود ليملأ عرض الصورة وحسّن الإضاءة وأعد المحاولة', true); }
 }
 
 /* ---------- تقرير الأصول ---------- */
 const RP = { rows: [], view: [], sort: 'floor', dir: 1, group: '', f: { floor: '', room: '', kind: '', type: '', status: '', hold: '', person: '', q: '' } };
 const RP_COLS = [['code', 'الرمز'], ['type', 'النوع'], ['maker', 'الشركة'], ['serial', 'الرقم التسلسلي'], ['floor', 'الطابق'], ['door', 'الباب'], ['roomName', 'الغرفة'], ['status', 'الحالة'], ['holder', 'العهدة']];
-views.report = async function () {
-  const r = await api('apiReport');
-  if (!r) return;
-  RP.rows = r;
+views.report = function () {
+  RP.rows = S.boot.assets.slice();
   renderReport();
+  apiQ('apiReport').then(function (r) { if (r && S.cur === 'report') { RP.rows = r; rpDraw(); } });
 };
 function floorIdx(code) { const i = S.boot.floors.findIndex(function (f) { return f.code === code; }); return i < 0 ? 999 : i; }
 function rpVal(a, k) {
@@ -746,27 +1063,7 @@ async function rpCustodyXlsx() {
   busy(false);
 }
 
-/* ---------- المسح ---------- */
-views.scan = function () {
-  page('مسح رمز',
-    '<div class="card"><button class="btn primary" onclick="liveScan()">الكاميرا المباشرة</button><div style="height:8px"></div>' +
-    '<label style="margin-top:0">أو التقط صورة للرمز</label><input type="file" accept="image/*" capture="environment" onchange="photoScan(this)">' +
-    '<label>أو اكتب الرمز يدوياً</label><div class="row"><input id="mc" dir="ltr" placeholder="SH-MN-A12-001"><button class="btn sm" style="width:auto" onclick="openCode($(\'#mc\').value)">فتح</button></div></div>');
-  setTimeout(liveScan, 250);
-};
-function openCode(t) {
-  const c = parseCode(t);
-  if (!c) { toast('أدخل الرمز', true); return; }
-  go('asset', { code: c });
-}
-function liveScan() { scannerUI('مسح QR أو باركود', function (t) { openCode(t); }, {}); }
-async function photoScan(inp) {
-  const f = inp.files && inp.files[0];
-  if (!f) return;
-  busy(true);
-  try { const r = await decodeImageFile(f); busy(false); openCode(r.text); }
-  catch (e) { busy(false); toast('تعذّرت قراءة الصورة. قرّب الباركود ليملأ عرض الصورة وحسّن الإضاءة وأعد المحاولة', true); }
-}
+
 function loadScript(src) {
   return new Promise(function (res, rej) {
     const s = document.createElement('script');
@@ -1040,6 +1337,7 @@ function drawLabel(a, mode, wmm, hmm) {
   return c;
 }
 
+
 /* ---------- تصدير الملصقات ---------- */
 views.export = function () {
   const b = S.boot;
@@ -1053,10 +1351,16 @@ views.export = function () {
     '<div style="height:8px"></div><button class="btn primary" onclick="loadExport()">عرض الأصول</button></div><div id="xout"></div>');
   const xf = $('#xf'); xf.onchange = function () { if (!xf.value) $('#xr').innerHTML = '<option value="">الكل</option>'; else fillRooms('xf', 'xr', true); };
 };
-async function loadExport() {
+function loadExport() {
   const f = { floor: $('#xf').value, room: $('#xr').value, kind: $('#xk').value, type: $('#xt').value, onlyUnprinted: $('#xu').checked };
-  const items = await api('apiExportList', f);
-  if (!items) return;
+  const items = S.boot.assets.filter(function (a) {
+    if (f.floor && a.floor !== f.floor) return false;
+    if (f.room && a.room !== f.room) return false;
+    if (f.kind && a.kind !== f.kind) return false;
+    if (f.type && a.type !== f.type) return false;
+    if (f.onlyUnprinted && a.printedAt) return false;
+    return true;
+  });
   S.exp.items = items;
   if (!items.length) { $('#xout').innerHTML = '<p class="mut">لا توجد أصول مطابقة.</p>'; return; }
   const st = S.boot.settings;
@@ -1088,6 +1392,7 @@ async function runExport(kind) {
   let blob, name;
   try {
     if (kind === 'pdf') {
+      await ensureLib('jspdf');
       const jsPDF = window.jspdf.jsPDF, ori = o.w >= o.h ? 'l' : 'p';
       const pdf = new jsPDF({ orientation: ori, unit: 'mm', format: [o.w, o.h] });
       for (let i = 0; i < items.length; i++) {
@@ -1097,6 +1402,7 @@ async function runExport(kind) {
       }
       blob = pdf.output('blob'); name = 'labels.pdf';
     } else {
+      await ensureLib('jszip');
       const zip = new JSZip();
       for (let i = 0; i < items.length; i++) {
         const d = drawLabel(items[i], o.mode, o.w, o.h).toDataURL('image/png').split(',')[1];
@@ -1111,19 +1417,26 @@ async function runExport(kind) {
   $('#xlink').innerHTML = '<div class="grid2" style="margin:0"><a class="btn primary" style="text-align:center;text-decoration:none" href="' + url + '" download="' + name + '">تحميل الملف</a>' +
     '<a class="btn" style="text-align:center;text-decoration:none" href="' + url + '" target="_blank">فتح في نافذة</a></div>';
   if ($('#xmk').checked) {
-    const r = await api('apiMarkPrinted', items.map(function (i) { return i.code; }));
-    if (r) { await refresh(); toast('سُجّلت ' + r.marked + ' ملصقات كمطبوعة'); }
+    await markPrinted(items.map(function (i) { return i.code; }));
   }
 }
 
 /* ---------- بدء التشغيل ---------- */
-(async function init() {
-  setTimeout(function () { ensureZX().catch(function () {}); }, 1500);
+(function init() {
+  setTimeout(function () { ensureZX().catch(function () {}); }, 2500);
   S.token = loadTok();
   if (!S.token) { show('login'); return; }
+  let cached = null;
+  try { cached = JSON.parse(localStorage.getItem('aq_boot') || 'null'); } catch (e) {}
+  if (cached && cached.assets) {
+    setBoot(cached); S.bootAt = 0;
+    start();
+    bgRefresh();
+    return;
+  }
   busy(true);
-  try { const b = await callRaw('apiBoot', S.token); S.boot = b; S.user = b.user; busy(false); await start(); }
-  catch (e) { busy(false); saveTok(null); S.token = null; show('login'); }
+  callRaw('apiBoot', S.token).then(function (b) { setBoot(b); busy(false); start(); })
+    .catch(function () { busy(false); saveTok(null); S.token = null; show('login'); });
 })();
 </script>
 </body>
