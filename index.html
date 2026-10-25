@@ -69,6 +69,7 @@ summary{cursor:pointer;font-weight:600}
 #rd .aim{position:absolute;left:6%;right:6%;top:25%;bottom:25%;border:2px solid rgba(255,255,255,.75);border-radius:8px;pointer-events:none}
 canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#fff}
 .ok-box{background:var(--ok2);color:var(--ok);border-radius:10px;padding:10px;margin:0 0 10px}
+.badbox{background:var(--bad2);color:var(--bad);border-radius:10px;padding:10px;margin:0 0 10px}
 .warnbox{background:var(--warn2);color:var(--warn);border-radius:10px;padding:10px;margin:0 0 10px}
 </style>
 <script defer src="https://cdnjs.cloudflare.com/ajax/libs/qrcode-generator/1.4.4/qrcode.min.js"></script>
@@ -83,11 +84,12 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 
 <script>
 /* الصق هنا رابط Apps Script المنشور (ينتهي بـ /exec) بين علامتي الاقتباس */
-const UI_VERSION = 'v6.2';
+const UI_VERSION = 'v7.0';
 const UI_DATE = '2026-10-25';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxADQOlh3G90s6mgoHq-Wd5HW3cwnboR9s6avWBKuI_g0WO_Sj9uNEJyJAe7y9TexKBZA/exec';
+const INITIAL_ORG = (new URLSearchParams(location.search).get('o') || '').replace(/[^A-Za-z0-9]/g, '').slice(0, 10);
 const INITIAL_ID = (new URLSearchParams(location.search).get('id') || '').replace(/[^A-Za-z0-9\-]/g, '').slice(0, 60);
-const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] }, idx: { by: {}, ser: {} }, bootAt: 0, lastErr: '' };
+const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] }, idx: { by: {}, ser: {} }, bootAt: 0, lastErr: '', owner: false, orgs: [] };
 const views = {};
 const $ = function (s, r) { return (r || document).querySelector(s); };
 const esc = function (s) {
@@ -218,6 +220,8 @@ async function bgRefresh() {
 document.addEventListener('visibilitychange', function () {
   if (!document.hidden && S.token && S.boot && Date.now() - S.bootAt > 120000) bgRefresh();
 });
+function lsGet(k) { try { return localStorage.getItem(k) || ''; } catch (e) { return ''; } }
+function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
 function saveTok(t) { try { if (t) localStorage.setItem('aq_tok', t); else localStorage.removeItem('aq_tok'); } catch (e) {} }
 function loadTok() { try { return localStorage.getItem('aq_tok'); } catch (e) { return null; } }
 
@@ -226,9 +230,9 @@ function loadTok() { try { return localStorage.getItem('aq_tok'); } catch (e) { 
 function show(name, p) { S.cur = name; S.curP = p; return views[name](p); }
 function go(name, p) { S.stack.push({ name: S.cur, p: S.curP }); return show(name, p); }
 function back() { const x = S.stack.pop(); if (x && x.name) show(x.name, x.p); else home(); }
-function home() { S.stack = []; show('home'); }
+function home() { S.stack = []; show(S.owner ? 'owner' : 'home'); }
 function logout(expired) {
-  saveTok(null); try { localStorage.removeItem('aq_boot'); } catch (e) {} S.token = null; S.stack = [];
+  saveTok(null); lsSet('aq_owner', ''); try { localStorage.removeItem('aq_boot'); } catch (e) {} S.token = null; S.owner = false; S.stack = [];
   show('login');
   if (expired) toast('انتهت الجلسة، سجّل الدخول من جديد', true);
 }
@@ -266,25 +270,35 @@ function parseCode(t) {
 
 /* ---------- الدخول ---------- */
 views.login = function () {
-  $('#app').innerHTML = '<div class="wrap" style="padding-top:48px"><div class="card"><h2 style="margin:0 0 2px">إدارة الأصول الحكومية</h2><p class="sub">مدرسة موسى بن نصير</p>' +
+  const own = !!S.loginOwner, org = INITIAL_ORG || lsGet('aq_org');
+  $('#app').innerHTML = '<div class="wrap" style="padding-top:40px"><div class="card"><h2 style="margin:0 0 2px">إدارة الأصول الحكومية</h2><p class="sub">' + (own ? 'دخول مالك المنصة' : 'سجّل الدخول إلى مؤسستك') + '</p>' +
+    (own ? '' : '<label>رمز المؤسسة</label><input id="lo" dir="ltr" autocapitalize="characters" autocomplete="off" value="' + esc(org) + '" placeholder="مثال: MN">') +
     '<label>اسم الدخول</label><input id="lu" dir="ltr" autocomplete="username" autocapitalize="none">' +
     '<label>رمز الدخول</label><input id="lp" type="password" dir="ltr" autocomplete="current-password" onkeydown="if(event.key===\'Enter\')doLogin()">' +
     '<div style="height:12px"></div><button class="btn primary" onclick="doLogin()">دخول</button></div>' +
+    '<p style="text-align:center;margin:6px 0"><a href="#" style="color:var(--pri);font-size:13px" onclick="S.loginOwner=' + (!own) + ';show(\'login\');return false">' + (own ? 'العودة لدخول المؤسسات' : 'دخول المالك') + '</a></p>' +
     '<p class="mut" style="text-align:center;direction:ltr">واجهة ' + UI_VERSION + ' — ' + UI_DATE + '</p></div>';
 };
 async function doLogin() {
-  const u = $('#lu').value.trim(), p = $('#lp').value;
+  const u = $('#lu').value.trim(), p = $('#lp').value, own = !!S.loginOwner;
+  const org = own ? '' : ($('#lo').value || '').trim().toUpperCase();
   if (!u || !p) { toast('أدخل اسم الدخول والرمز', true); return; }
   busy(true);
   try {
-    const r = await callRaw('apiLogin', u, p);
-    S.token = r.token; saveTok(r.token); setBoot(r.boot);
+    if (own) {
+      const r = await callRaw('apiOwnerLogin', u, p);
+      S.token = r.token; S.owner = true; S.orgs = r.orgs; saveTok(r.token); lsSet('aq_owner', '1');
+    } else {
+      const r = await callRaw('apiLogin', org, u, p);
+      S.token = r.token; S.owner = false; saveTok(r.token); lsSet('aq_owner', ''); lsSet('aq_org', org); setBoot(r.boot);
+    }
   } catch (e) { busy(false); fail(e); return; }
   busy(false);
   start();
 }
 function start() {
   S.stack = [];
+  if (S.owner) { show('owner'); return; }
   if (INITIAL_ID && !start.done) {
     start.done = true;
     S.cur = 'home';
@@ -293,10 +307,23 @@ function start() {
 }
 
 /* ---------- الرئيسية ---------- */
+function subBanner() {
+  const x = S.boot.sub;
+  if (!x) return '';
+  if (x.expired) return '<div class="badbox"><b>انتهى اشتراك المؤسسة</b> (' + esc(x.end) + '). العرض والبحث والتقارير والتصدير متاحة، أما الترميز والتعديل فمتوقفان. جدّد الاشتراك لمواصلة الترميز.</div>';
+  if (x.end && x.hoursLeft != null && x.hoursLeft <= 72) return '<div class="warnbox">ينتهي الاشتراك (' + esc(x.plan) + ') خلال <b>' + x.hoursLeft + '</b> ساعة. جدّد لتستمر في الترميز.</div>';
+  if (x.end && x.daysLeft != null && x.daysLeft <= 14) return '<div class="warnbox">يتبقى <b>' + x.daysLeft + '</b> يوماً على انتهاء الاشتراك (' + esc(x.end) + ').</div>';
+  return '';
+}
+function canWrite() {
+  const x = S.boot && S.boot.sub;
+  if (x && x.expired) { toast('انتهى اشتراك المؤسسة. جدّد لمواصلة الترميز', true); return false; }
+  return true;
+}
 views.home = function () {
   const b = S.boot, st = stats();
   page(b.settings.appName,
-    '<p class="sub">' + esc(b.settings.schoolName) + ' — ' + esc(S.user.name) + '</p>' +
+    '<p class="sub">' + esc(b.settings.schoolName) + ' — ' + esc(S.user.name) + '</p>' + subBanner() +
     '<div class="grid2"><div class="mc"><span>إجمالي الأصول</span><b>' + st.total + '</b></div>' +
     '<div class="mc"><span>في العهدة الآن</span><b>' + st.custody + '</b></div>' +
     '<div class="mc"><span>تحتاج صيانة</span><b>' + st.maint + '</b></div>' +
@@ -306,6 +333,7 @@ views.home = function () {
     '<button class="btn" onclick="go(\'report\')">تقرير الأصول</button>' +
     '<button class="btn" onclick="go(\'rooms\')">الغرف والأصول</button>' +
     '<button class="btn" onclick="go(\'export\')">تصدير الملصقات</button>' +
+    (S.user.role === 'مدير' ? '<button class="btn" onclick="go(\'catalog\')">التحكم بالأجهزة</button><button class="btn" onclick="go(\'users\')">المستخدمون</button>' : '') +
     '<button class="btn" onclick="logout()">تسجيل الخروج</button></div>' +
     '<div class="card"><label style="margin-top:0">بحث بالرمز أو الرقم التسلسلي أو الموديل أو اسم الغرفة</label>' +
     '<div class="row"><input id="q" onkeydown="if(event.key===\'Enter\')doSearch()"><button class="btn sm" style="width:auto" onclick="doSearch()">بحث</button></div>' +
@@ -355,6 +383,7 @@ views.rooms = function () {
   page('الغرف والأصول', h);
 };
 async function addFloor() {
+  if (!canWrite()) return;
   const code = $('#nfc').value, name = $('#nfn').value.trim();
   const r = await api('apiAddFloor', code, name);
   if (!r) return;
@@ -362,6 +391,7 @@ async function addFloor() {
   toast('تمت إضافة الطابق'); show('rooms');
 }
 async function addRoom() {
+  if (!canWrite()) return;
   const f = $('#nrf').value, code = $('#nrc').value, name = $('#nrn').value.trim();
   const r = await api('apiAddRoom', f, code, name);
   if (!r) return;
@@ -411,6 +441,7 @@ function adSync() {
   Object.keys(m).forEach(function (k) { const v = g(m[k]); if (v !== null && v !== '__new__') ADD[k] = v; });
 }
 function openAdd(p) {
+  if (!canWrite()) return;
   p = p || {};
   if (p.kind) ADD.kind = p.kind;
   if (p.floor) { ADD.floor = p.floor; ADD.room = p.room || ''; }
@@ -602,6 +633,7 @@ function renderFound(a) {
   fillRooms('fmF', 'fmR', false, ADD.room || a.room);
 }
 async function doMoveFound() {
+  if (!canWrite()) return;
   const a = S.found;
   const r = await api('apiAction', a.code, 'نقل', { floor: $('#fmF').value, room: $('#fmR').value, note: $('#fmN').value });
   if (!r) return;
@@ -693,6 +725,7 @@ async function markPrinted(codes) {
 function lblOpen() { go('label', { codes: ADD.last.map(function (a) { return a.code; }) }); }
 function lblItems() { return S.lbl.codes.map(function (c) { return S.idx.by[String(c).toUpperCase()]; }).filter(Boolean); }
 views.label = function (p) {
+  if (!canWrite()) { back(); return; }
   S.lbl = { codes: p && p.codes ? p.codes : ADD.last.map(function (a) { return a.code; }) };
   const st = S.boot.settings, n = S.lbl.codes.length;
   page('طباعة ملصق',
@@ -827,6 +860,7 @@ function renderAsset(a, moves) {
   try { drawQRTo(cv.getContext('2d'), qrUrl(a.code), 0, 0, 240); } catch (e) {}
 }
 async function assignTo() {
+  if (!canWrite()) return;
   let n = $('#hp').value;
   if (!n) { toast('اختر الشخص', true); return; }
   if (n === '__new__') {
@@ -844,6 +878,7 @@ async function assignTo() {
   toast('تمت العهدة لـ ' + n);
 }
 async function act(action, data) {
+  if (!canWrite()) return;
   const a = await api('apiAction', S.asset.code, action, data);
   if (!a) return;
   S.mv[a.code] = a.moves; upsertAsset(a);
@@ -1322,7 +1357,7 @@ function scannerUI(title, onText, o) {
 
 /* ---------- رسم QR والملصقات ---------- */
 function siteBase() { return location.origin + location.pathname.replace(/index\.html$/, ''); }
-function qrUrl(code) { return siteBase() + '?id=' + encodeURIComponent(code); }
+function qrUrl(code) { return siteBase() + '?id=' + encodeURIComponent(code) + (S.boot && S.boot.sub && S.boot.sub.code ? '&o=' + encodeURIComponent(S.boot.sub.code) : ''); }
 function drawQRTo(x, text, px, py, size) {
   const q = qrcode(0, 'M');
   q.addData(text); q.make();
@@ -1384,6 +1419,7 @@ function drawLabel(a, mode, wmm, hmm) {
 
 /* ---------- تصدير الملصقات ---------- */
 views.export = function () {
+  if (!canWrite()) { back(); return; }
   const b = S.boot;
   const names = []; b.devTypes.concat(b.furnTypes).forEach(function (t) { if (names.indexOf(t.name) < 0) names.push(t.name); });
   page('تصدير الملصقات',
@@ -1465,11 +1501,261 @@ async function runExport(kind) {
   }
 }
 
+/* ---------- مالك المنصة: إدارة المؤسسات ---------- */
+function dueText(o) {
+  if (!o.end) return 'اشتراك دائم';
+  if (o.expired) return 'منتهٍ منذ ' + o.end;
+  return 'ينتهي ' + o.end + ' (' + (o.hoursLeft != null && o.hoursLeft <= 72 ? o.hoursLeft + ' ساعة' : o.daysLeft + ' يوم') + ')';
+}
+function orgCard(o) {
+  const c = esc(o.code), bad = o.expired || o.status === 'موقوف';
+  return '<div class="card"><div class="row" style="justify-content:space-between"><b>' + esc(o.name) + '</b><span class="bd code">' + c + '</span></div>' +
+    '<p class="mut" style="margin:2px 0">' + esc(o.plan) + ' — ' + esc(dueText(o)) + '</p>' +
+    '<p class="mut" style="margin:2px 0 8px">الأصول: ' + (o.assets == null ? '—' : o.assets) + ' | المدير: ' + esc(o.adminUser || '—') + ' | ' +
+    '<span class="bd ' + (o.status === 'موقوف' ? 'bad' : (o.expired ? 'warn' : 'ok')) + '">' + (o.status === 'موقوف' ? 'موقوفة' : (o.expired ? 'منتهي (قراءة فقط)' : 'نشطة')) + '</span></p>' +
+    '<div class="grid2" style="margin:0">' +
+    '<button class="btn sm" onclick="orgExt(\'' + c + '\',6)">تمديد 6 أشهر</button>' +
+    '<button class="btn sm" onclick="orgExt(\'' + c + '\',12)">تمديد سنة</button>' +
+    '<button class="btn sm" onclick="orgExt(\'' + c + '\',0)">تمديد (عدد أشهر…)</button>' +
+    '<button class="btn sm" onclick="orgTrial(\'' + c + '\')">تجريبي 24 ساعة</button>' +
+    '<button class="btn sm" onclick="orgPerm(\'' + c + '\')">اشتراك دائم</button>' +
+    '<button class="btn sm" onclick="orgToggle(\'' + c + '\',\'' + (o.status === 'موقوف' ? 'نشط' : 'موقوف') + '\')">' + (o.status === 'موقوف' ? 'تفعيل' : 'إيقاف') + '</button>' +
+    '<button class="btn sm" onclick="orgPin(\'' + c + '\')">رمز دخول المدير…</button>' +
+    (o.url ? '<a class="btn sm" style="text-align:center;text-decoration:none" href="' + esc(o.url) + '" target="_blank">فتح الشيت</a>' : '<span></span>') +
+    '</div></div>';
+}
+views.owner = function () {
+  const L = S.orgs || [];
+  const bad = L.filter(function (o) { return o.expired || o.status === 'موقوف'; }).length;
+  let h = '<div class="grid2"><div class="mc"><span>المؤسسات</span><b>' + L.length + '</b></div><div class="mc"><span>منتهية أو موقوفة</span><b>' + bad + '</b></div></div>';
+  if (S.created) {
+    const x = S.created;
+    h += '<div class="ok-box"><b>تم إنشاء المؤسسة</b><p style="margin:6px 0 2px">أرسل هذه البيانات لمدير المؤسسة:</p>' +
+      '<textarea id="ocInfo" readonly rows="6" style="direction:rtl">' + esc('رابط النظام: ' + siteBase() + '?o=' + x.code + '\nرمز المؤسسة: ' + x.code + '\nاسم الدخول: ' + x.user + '\nرمز الدخول: ' + x.pin + '\nالاشتراك: ' + x.plan) + '</textarea>' +
+      '<div style="height:6px"></div><button class="btn sm" onclick="copyInfo()">نسخ</button></div>';
+  }
+  h += '<details id="ocBox"><summary>+ مؤسسة جديدة</summary>' +
+    '<label>رمز المؤسسة (إنجليزي/أرقام، يكتبه المدير عند الدخول)</label><input id="oc_code" dir="ltr" maxlength="10" autocapitalize="characters">' +
+    '<label>اسم المؤسسة</label><input id="oc_name">' +
+    '<div class="grid2" style="margin:0"><div><label>رمز الولاية (يدخل في رمز الأصل)</label><input id="oc_state" dir="ltr" maxlength="4"></div><div><label>رمز المدرسة</label><input id="oc_school" dir="ltr" maxlength="4"></div></div>' +
+    '<label>اسم المدير</label><input id="oc_adm">' +
+    '<div class="grid2" style="margin:0"><div><label>اسم دخول المدير</label><input id="oc_user" dir="ltr" autocapitalize="none"></div><div><label>رمز دخول المدير</label><input id="oc_pin" dir="ltr" value="' + String(Math.floor(1000 + Math.random() * 9000)) + '"></div></div>' +
+    '<label>الاشتراك</label><select id="oc_plan"><option value="trial">تجريبي 24 ساعة</option><option value="1">شهر</option><option value="3">3 أشهر</option><option value="6" selected>6 أشهر</option><option value="12">سنة</option></select>' +
+    '<label>ملاحظات (اختياري)</label><input id="oc_notes">' +
+    '<div style="height:10px"></div><button class="btn primary" onclick="orgCreate()">إنشاء المؤسسة وشيتها</button><p class="mut">يستغرق الإنشاء بضع ثوانٍ.</p></details>';
+  h += L.map(orgCard).join('') + '<div style="height:6px"></div><button class="btn" onclick="logout()">تسجيل الخروج</button>' +
+    '<p class="mut" style="text-align:center;direction:ltr;margin-top:10px">واجهة ' + UI_VERSION + ' — ' + UI_DATE + '</p>';
+  page('إدارة المؤسسات', h, true);
+};
+function copyInfo() {
+  const t = $('#ocInfo'); t.select();
+  try { navigator.clipboard.writeText(t.value); toast('تم النسخ'); } catch (e) { document.execCommand('copy'); toast('تم النسخ'); }
+}
+async function orgCreate() {
+  const g = function (id) { return $('#' + id).value.trim(); };
+  const plan = g('oc_plan');
+  const o = { code: g('oc_code'), name: g('oc_name'), state: g('oc_state'), school: g('oc_school'), adminName: g('oc_adm'), adminUser: g('oc_user'), adminPin: g('oc_pin'), plan: plan === 'trial' ? 'trial' : 'months', months: plan === 'trial' ? 0 : Number(plan), notes: g('oc_notes') };
+  const r = await api('apiOrgCreate', o);
+  if (!r) return;
+  S.orgs.push(r);
+  S.created = { code: r.code, user: o.adminUser, pin: o.adminPin, plan: r.plan };
+  show('owner');
+}
+async function orgUpd(code, p, msg) {
+  const r = await api('apiOrgUpdate', code, p);
+  if (!r) return;
+  S.orgs = S.orgs.map(function (o) { return o.code === code ? r : o; });
+  S.created = null;
+  show('owner'); toast(msg);
+}
+function orgExt(code, m) {
+  if (!m) { m = Number(prompt('عدد أشهر التمديد:', '6')); if (!m) return; }
+  orgUpd(code, { extendMonths: m }, 'تم التمديد ' + m + ' شهر');
+}
+function orgTrial(code) { orgUpd(code, { trial: true }, 'تجريبي 24 ساعة من الآن'); }
+function orgPerm(code) { orgUpd(code, { permanent: true }, 'أصبح الاشتراك دائماً'); }
+function orgToggle(code, st) { orgUpd(code, { status: st }, st === 'موقوف' ? 'تم إيقاف المؤسسة' : 'تم تفعيل المؤسسة'); }
+async function orgPin(code) {
+  const p = prompt('رمز الدخول الجديد لمدير المؤسسة (4 خانات على الأقل):', '');
+  if (!p) return;
+  const r = await api('apiOrgResetAdmin', code, p);
+  if (r) toast('تم تغيير رمز المدير (' + r.username + ')');
+}
+
+/* ---------- مدير المؤسسة: المستخدمون الفرعيون ---------- */
+function expFrom(val, dateStr) {
+  if (!val) return '';
+  if (val === 'd') return String(dateStr || '').trim();
+  const d = new Date(); d.setMonth(d.getMonth() + Number(val));
+  const p = function (n) { return n < 10 ? '0' + n : String(n); };
+  return d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate());
+}
+function expSel(id, cur) {
+  return '<select id="' + id + '" onchange="$(\'#' + id + 'D\').style.display=this.value===\'d\'?\'block\':\'none\'">' +
+    (cur ? '<option value="keep">' + esc('كما هو (' + cur + ')') + '</option>' : '') +
+    '<option value="">بلا حد</option><option value="1">شهر</option><option value="3">3 أشهر</option><option value="6">6 أشهر</option><option value="12">سنة</option><option value="d">تاريخ محدد</option></select>' +
+    '<input id="' + id + 'D" type="date" style="display:none;margin-top:6px">';
+}
+views.users = function () {
+  page('المستخدمون', '<div id="usBody"><p class="mut">جارٍ التحميل…</p></div>');
+  apiQ('apiUsers').then(function (r) { if (r && S.cur === 'users') { S.users = r; renderUsers(); } });
+};
+function renderUsers() {
+  const L = S.users || [];
+  let h = '<details><summary>+ مستخدم جديد</summary><label>الاسم (يظهر في سجل العهدة)</label><input id="un_name">' +
+    '<div class="grid2" style="margin:0"><div><label>اسم الدخول</label><input id="un_user" dir="ltr" autocapitalize="none"></div><div><label>رمز الدخول</label><input id="un_pin" dir="ltr"></div></div>' +
+    '<label>الصلاحية</label><select id="un_role"><option>مستخدم</option><option>قراءة</option></select>' +
+    '<label>مدة صلاحية الدخول</label>' + expSel('un_exp') +
+    '<div style="height:10px"></div><button class="btn primary" onclick="userAdd()">إضافة المستخدم</button></details>';
+  h += L.map(function (u, i) {
+    const mg = u.role === 'مدير';
+    return '<div class="card"><div class="row" style="justify-content:space-between"><b>' + esc(u.name) + '</b><span class="bd ' + (u.active ? (mg ? '' : 'ok') : 'bad') + '">' + (u.active ? esc(u.role) : 'معطّل') + '</span></div>' +
+      '<small class="code">' + esc(u.username) + '</small> <small>— ' + (u.expires ? 'ينتهي ' + esc(u.expires) : 'بلا حد') + '</small>' +
+      (mg ? '<p class="mut" style="margin:6px 0 0">حساب المدير</p>' :
+        '<details style="margin-top:8px"><summary>تعديل</summary>' +
+        '<label>رمز دخول جديد (اتركه فارغاً لعدم التغيير)</label><input id="ue_pin' + i + '" dir="ltr">' +
+        '<label>الصلاحية</label><select id="ue_role' + i + '">' + opts(['مستخدم', 'قراءة'], u.role) + '</select>' +
+        '<label>مدة الصلاحية</label>' + expSel('ue_exp' + i, u.expires || 'بلا حد') +
+        '<div style="height:8px"></div><div class="grid2" style="margin:0"><button class="btn primary sm" onclick="userSave(' + i + ')">حفظ</button>' +
+        '<button class="btn sm" onclick="userToggle(' + i + ')">' + (u.active ? 'تعطيل' : 'تفعيل') + '</button></div></details>') + '</div>';
+  }).join('');
+  $('#usBody').innerHTML = h;
+}
+async function userAdd() {
+  const g = function (id) { return $('#' + id).value.trim(); };
+  const r = await api('apiUserAdd', { name: g('un_name'), username: g('un_user'), pin: g('un_pin'), role: g('un_role'), expires: expFrom($('#un_exp').value, $('#un_expD').value) });
+  if (!r) return;
+  S.users = r; renderUsers(); toast('تمت إضافة المستخدم');
+}
+async function userSave(i) {
+  const u = S.users[i], p = { role: $('#ue_role' + i).value };
+  const pin = $('#ue_pin' + i).value.trim();
+  if (pin) p.pin = pin;
+  const ev = $('#ue_exp' + i).value;
+  if (ev !== 'keep') p.expires = expFrom(ev, $('#ue_exp' + i + 'D').value);
+  const r = await api('apiUserUpdate', u.username, p);
+  if (!r) return;
+  S.users = r; renderUsers(); toast('تم الحفظ');
+}
+async function userToggle(i) {
+  const u = S.users[i];
+  const r = await api('apiUserUpdate', u.username, { active: !u.active });
+  if (!r) return;
+  S.users = r; renderUsers(); toast(u.active ? 'تم التعطيل' : 'تم التفعيل');
+}
+
+/* ---------- مدير المؤسسة: التحكم بالأجهزة ---------- */
+const CAT_TABS = [['dev', 'أنواع الأجهزة'], ['furn', 'أنواع الأثاث'], ['maker', 'الشركات'], ['model', 'الموديلات']];
+views.catalog = function () {
+  S.catTab = S.catTab || 'dev';
+  page('التحكم بالأجهزة', '<div id="catBody"><p class="mut">جارٍ التحميل…</p></div>');
+  loadCat();
+};
+async function loadCat() {
+  const r = await apiQ('apiCatalog');
+  if (r && S.cur === 'catalog') { S.cat = r; syncBootCat(r); renderCat(); }
+}
+function syncBootCat(r) {
+  S.boot.devTypes = r.devTypes.map(function (t) { return { name: t.name, code: '' }; });
+  S.boot.furnTypes = r.furnTypes.map(function (t) { return { name: t.name, code: '' }; });
+  S.boot.makers = r.makers.map(function (m) { return m.name; });
+  S.boot.models = r.models.map(function (m) { return { maker: m.maker, model: m.model }; });
+}
+function catTab(t) { S.catTab = t; renderCat(); }
+function renderCat() {
+  const c = S.cat, t = S.catTab;
+  let h = '<div class="grid2" style="grid-template-columns:repeat(4,minmax(0,1fr));gap:4px">' + CAT_TABS.map(function (x) {
+    return '<button class="btn sm' + (x[0] === t ? ' primary' : '') + '" style="padding:7px 2px;font-size:12px" onclick="catTab(\'' + x[0] + '\')">' + x[1] + '</button>';
+  }).join('') + '</div><div style="height:10px"></div>';
+  const cnt = function (n, w) { return n ? n + ' ' + w : 'غير مستخدم'; };
+  if (t === 'dev' || t === 'furn') {
+    const L = t === 'dev' ? c.devTypes : c.furnTypes;
+    h += '<div class="card"><div class="row"><input id="caNew" placeholder="' + (t === 'dev' ? 'نوع جهاز جديد' : 'نوع أثاث جديد') + '"><button class="btn sm primary" style="width:auto" onclick="catAdd()">إضافة</button></div></div>';
+    h += L.map(function (x, i) {
+      return '<div class="card"><details><summary>' + esc(x.name) + ' <small>— ' + cnt(x.count, 'أصل') + '</small></summary>' +
+        '<label>الاسم</label><input id="ce' + i + '" value="' + esc(x.name) + '"><div style="height:8px"></div>' +
+        '<div class="grid2" style="margin:0"><button class="btn primary sm" onclick="catSave(' + i + ')">حفظ الاسم</button><button class="btn sm" onclick="catDel(' + i + ')">حذف</button></div>' +
+        '<p class="mut">إن كتبت اسماً موجوداً يُدمج النوعان وتنتقل أصولهما.</p></details></div>';
+    }).join('') || '<p class="mut">لا توجد أنواع.</p>';
+  } else if (t === 'maker') {
+    h += '<div class="card"><div class="row"><input id="caNew" dir="ltr" placeholder="شركة جديدة"><button class="btn sm primary" style="width:auto" onclick="catAdd()">إضافة</button></div></div>';
+    h += c.makers.map(function (x, i) {
+      return '<div class="card"><details><summary>' + esc(x.name) + ' <small>— ' + cnt(x.count, 'أصل') + '، ' + x.models + ' موديل</small></summary>' +
+        '<label>الاسم</label><input id="ce' + i + '" dir="ltr" value="' + esc(x.name) + '"><div style="height:8px"></div>' +
+        '<div class="grid2" style="margin:0"><button class="btn primary sm" onclick="catSave(' + i + ')">حفظ الاسم</button><button class="btn sm" onclick="catDel(' + i + ')">حذف</button></div>' +
+        '<p class="mut">تعديل الاسم يحدّثه في الموديلات والأصول. والاسم الموجود يُدمج. حذف الشركة يحذف موديلاتها غير المستخدمة.</p></details></div>';
+    }).join('') || '<p class="mut">لا توجد شركات.</p>';
+  } else {
+    const mk = S.catMaker && c.makers.some(function (m) { return m.name === S.catMaker; }) ? S.catMaker : (c.makers[0] ? c.makers[0].name : '');
+    S.catMaker = mk;
+    const L = c.models.map(function (m, i) { return { m: m, i: i }; }).filter(function (x) { return x.m.maker === mk; });
+    h += '<div class="card"><label style="margin-top:0">الشركة</label><select id="caMk" onchange="S.catMaker=this.value;renderCat()">' + opts(c.makers.map(function (m) { return m.name; }), mk) + '</select>' +
+      '<div class="row" style="margin-top:8px"><input id="caNew" dir="ltr" placeholder="موديل جديد لهذه الشركة"><button class="btn sm primary" style="width:auto" onclick="catAdd()">إضافة</button></div></div>';
+    h += L.map(function (x) {
+      return '<div class="card"><details><summary>' + esc(x.m.model) + ' <small>— ' + cnt(x.m.count, 'أصل') + '</small></summary>' +
+        '<label>اسم الموديل</label><input id="ce' + x.i + '" dir="ltr" value="' + esc(x.m.model) + '">' +
+        '<label>الشركة (غيّرها لنقل الموديل)</label><select id="cm' + x.i + '">' + opts(c.makers.map(function (m) { return m.name; }), x.m.maker) + '</select><div style="height:8px"></div>' +
+        '<div class="grid2" style="margin:0"><button class="btn primary sm" onclick="catSave(' + x.i + ')">حفظ</button><button class="btn sm" onclick="catDel(' + x.i + ')">حذف</button></div></details></div>';
+    }).join('') || '<p class="mut">لا توجد موديلات لهذه الشركة.</p>';
+  }
+  $('#catBody').innerHTML = h;
+}
+async function catAfter(r, msg) {
+  if (!r) return;
+  S.cat = r; syncBootCat(r); renderCat(); toast(msg);
+  refresh(true);
+}
+async function catAdd() {
+  const n = $('#caNew').value.trim(), t = S.catTab;
+  if (!n) { toast('اكتب الاسم', true); return; }
+  let ok;
+  if (t === 'dev' || t === 'furn') ok = await api('apiAddType', t === 'dev' ? 'جهاز' : 'أثاث', n);
+  else if (t === 'maker') ok = await api('apiAddMaker', n);
+  else ok = await api('apiAddModel', S.catMaker, n);
+  if (!ok) return;
+  const r = await api('apiCatalog');
+  if (r) { S.cat = r; syncBootCat(r); renderCat(); toast('تمت الإضافة'); }
+}
+function catKind() { return { dev: 'devType', furn: 'furnType', maker: 'maker', model: 'model' }[S.catTab]; }
+async function catSave(i) {
+  const t = S.catTab, c = S.cat, nn = $('#ce' + i).value.trim();
+  if (!nn) { toast('اكتب الاسم', true); return; }
+  let r;
+  if (t === 'dev' || t === 'furn') {
+    const L = t === 'dev' ? c.devTypes : c.furnTypes, old = L[i].name;
+    if (L.some(function (x, j) { return j !== i && x.name.toLowerCase() === nn.toLowerCase(); }) && !confirm('الاسم «' + nn + '» موجود، سيتم دمج النوعين. متابعة؟')) return;
+    r = await api('apiCatRename', catKind(), old, nn);
+  } else if (t === 'maker') {
+    const old = c.makers[i].name;
+    if (c.makers.some(function (x, j) { return j !== i && x.name.toLowerCase() === nn.toLowerCase(); }) && !confirm('الشركة «' + nn + '» موجودة، سيتم دمجهما. متابعة؟')) return;
+    r = await api('apiCatRename', 'maker', old, nn);
+  } else {
+    const m = c.models[i], nm = $('#cm' + i).value;
+    r = await api('apiCatRename', 'model', m.model, nn, m.maker, nm);
+    if (r) S.catMaker = nm;
+  }
+  catAfter(r, 'تم الحفظ');
+}
+async function catDel(i) {
+  const t = S.catTab, c = S.cat;
+  let name, mk = '';
+  if (t === 'dev') name = c.devTypes[i].name; else if (t === 'furn') name = c.furnTypes[i].name;
+  else if (t === 'maker') name = c.makers[i].name; else { name = c.models[i].model; mk = c.models[i].maker; }
+  if (!confirm('حذف «' + name + '»؟')) return;
+  catAfter(await api('apiCatDelete', catKind(), name, mk), 'تم الحذف');
+}
+
 /* ---------- بدء التشغيل ---------- */
 (function init() {
   setTimeout(function () { ensureWasm(); ensureZX().catch(function () {}); }, 2500);
   S.token = loadTok();
   if (!S.token) { show('login'); return; }
+  if (lsGet('aq_owner') === '1') {
+    busy(true);
+    callRaw('apiOrgList', S.token).then(function (l) { S.owner = true; S.orgs = l; busy(false); start(); })
+      .catch(function () { busy(false); saveTok(null); S.token = null; show('login'); });
+    return;
+  }
   let cached = null;
   try { cached = JSON.parse(localStorage.getItem('aq_boot') || 'null'); } catch (e) {}
   if (cached && cached.assets) {
