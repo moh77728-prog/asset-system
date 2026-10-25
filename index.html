@@ -83,6 +83,8 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 
 <script>
 /* الصق هنا رابط Apps Script المنشور (ينتهي بـ /exec) بين علامتي الاقتباس */
+const UI_VERSION = 'v6.1';
+const UI_DATE = '2026-10-25';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxADQOlh3G90s6mgoHq-Wd5HW3cwnboR9s6avWBKuI_g0WO_Sj9uNEJyJAe7y9TexKBZA/exec';
 const INITIAL_ID = (new URLSearchParams(location.search).get('id') || '').replace(/[^A-Za-z0-9\-]/g, '').slice(0, 60);
 const S = { token: null, user: null, boot: null, stack: [], cur: null, curP: null, exp: { items: [] }, idx: { by: {}, ser: {} }, bootAt: 0, lastErr: '' };
@@ -307,7 +309,8 @@ views.home = function () {
     '<div class="card"><label style="margin-top:0">بحث بالرمز أو الرقم التسلسلي أو الموديل أو اسم الغرفة</label>' +
     '<div class="row"><input id="q" onkeydown="if(event.key===\'Enter\')doSearch()"><button class="btn sm" style="width:auto" onclick="doSearch()">بحث</button></div>' +
     '<div id="res"></div></div>' +
-    '<p class="mut" style="text-align:center"><a href="#" onclick="doRefresh();return false" style="color:var(--pri)">تحديث البيانات</a></p>', true);
+    '<p class="mut" style="text-align:center"><a href="#" onclick="doRefresh();return false" style="color:var(--pri)">تحديث البيانات</a></p>' +
+    '<p class="mut" style="text-align:center;direction:ltr" id="verLine">واجهة ' + UI_VERSION + ' — ' + UI_DATE + ' | الخادم ' + esc(b.version || 'قديم — حدّث Apps Script') + '</p>', true);
 };
 async function doRefresh() {
   const b = await refresh();
@@ -547,7 +550,7 @@ async function saveModel() {
 function scanSerial() {
   const dev = ADD.kind === 'جهاز';
   scannerUI(dev ? 'قراءة الرقم التسلسلي' : 'قراءة رمز الأصل', function (t) {
-    $('#adS').value = parseCode(t); adCheck(); ADD.viaScan = true;
+    $('#adS').value = lenovoSerial(t) || parseCode(t); adCheck(); ADD.viaScan = true;
   }, { ocr: dev });
 }
 function whereOf(a) { return esc(a.roomName) + ' (' + esc(a.floorName) + ')'; }
@@ -555,6 +558,8 @@ function whereOf(a) { return esc(a.roomName) + ' (' + esc(a.floorName) + ')'; }
 function adCheck() {
   const inp = $('#adS');
   if (!inp) return;
+  const ls = lenovoSerial(inp.value);
+  if (ls) inp.value = ls;
   const raw = inp.value.trim(), box = $('#adSChk'), fb = $('#adFound');
   ADD.serial = inp.value;
   if (!raw) { ADD.found = null; fb.innerHTML = ''; box.textContent = ''; return; }
@@ -855,7 +860,7 @@ views.scan = function () {
   setTimeout(liveScan, 250);
 };
 async function openCode(t) {
-  const q = parseCode(t);
+  const q = lenovoSerial(parseCode(t)) || parseCode(t);
   if (!q) { toast('أدخل الرمز', true); return; }
   let r = scanResolve(t, q);
   if (!r.hit && Date.now() - S.bootAt > 15000) { await refresh(true); r = scanResolve(t, q); }
@@ -1089,6 +1094,35 @@ async function ensureZX() {
   }
   throw new Error('تعذّر تحميل مكتبة القراءة. تحقق من الإنترنت.');
 }
+/* قارئ WebAssembly القوي (ZXing-C++): يقرأ الخطوط الرفيعة والمقلوب والمائل */
+const WASM_URL = 'https://cdn.jsdelivr.net/npm/zxing-wasm@3.1.6/dist/iife/reader/index.js';
+let WASM_P = null;
+function ensureWasm() {
+  if (window.ZXingWASM) return Promise.resolve(true);
+  if (!WASM_P) WASM_P = loadScript(WASM_URL).then(function () { return !!window.ZXingWASM; }).catch(function () { WASM_P = null; return false; });
+  return WASM_P;
+}
+const WASM_OPT = { formats: ['Code128', 'QRCode', 'Code39', 'EAN13', 'EAN8', 'UPCA', 'UPCE'], tryHarder: true, tryRotate: true, tryInvert: true, tryDownscale: true, maxNumberOfSymbols: 1 };
+async function wasmDecode(imgData) {
+  if (!window.ZXingWASM) return null;
+  try {
+    const r = await ZXingWASM.readBarcodesFromImageData(imgData, WASM_OPT);
+    if (r && r.length && r[0].text) return { text: r[0].text, format: r[0].format };
+  } catch (e) {}
+  return null;
+}
+function frameData(src, sw, sh, maxSide, cv) {
+  const sc = Math.min(1, maxSide / Math.max(sw, sh)), w = Math.max(1, Math.round(sw * sc)), h = Math.max(1, Math.round(sh * sc));
+  cv.width = w; cv.height = h;
+  const x = cv.getContext('2d', { willReadFrequently: true });
+  x.drawImage(src, 0, 0, w, h);
+  return x.getImageData(0, 0, w, h);
+}
+/* باركود Lenovo الطويل: 1S + نوع الجهاز(4) + الموديل(6) + السيريال(8) */
+function lenovoSerial(t) {
+  const m = /^1S([A-Z0-9]{18})$/i.exec(String(t || '').trim());
+  return m ? m[1].slice(10).toUpperCase() : null;
+}
 let ZX_READER = null;
 function zxReader() {
   if (ZX_READER) return ZX_READER;
@@ -1145,7 +1179,7 @@ async function imgToSource(file) {
   });
 }
 async function decodeImageFile(file) {
-  await ensureZX();
+  await Promise.all([ensureZX().catch(function () {}), ensureWasm()]);
   const src = await imgToSource(file);
   const sw = src.width || src.naturalWidth, sh = src.height || src.naturalHeight;
   const native = await makeNative();
@@ -1153,7 +1187,13 @@ async function decodeImageFile(file) {
     try { const d = await native.detect(src); if (d && d.length) return { text: d[0].rawValue, format: d[0].format }; } catch (e) {}
   }
   const cv = document.createElement('canvas'), sides = [2000, 1280, 3000, 800];
-  for (let i = 0; i < sides.length; i++) {
+  if (await ensureWasm()) {
+    for (let i = 0; i < sides.length; i++) {
+      const r = await wasmDecode(frameData(src, sw, sh, sides[i], cv));
+      if (r) return r;
+    }
+  }
+  for (let i = 0; i < sides.length && window.ZXing; i++) {
     const f = frameLum(src, sw, sh, sides[i], cv);
     let r = zxDecode(f.lum, f.w, f.h, true);
     if (!r) { const q = rot90(f.lum, f.w, f.h); r = zxDecode(q.lum, q.w, q.h, true); }
@@ -1164,7 +1204,9 @@ async function decodeImageFile(file) {
 }
 async function startLive(video, isClosed, onFound) {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) throw new Error('NOCAM');
-  await ensureZX();
+  const wasmP = ensureWasm();
+  await ensureZX().catch(function (e) { return wasmP.then(function (ok) { if (!ok) throw e; }); });
+  await Promise.race([wasmP, new Promise(function (r) { setTimeout(r, 1500); })]);
   const stream = await navigator.mediaDevices.getUserMedia({ audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1920 }, height: { ideal: 1080 } } });
   const stopAll = function () { try { stream.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {} };
   if (isClosed()) { stopAll(); return null; }
@@ -1193,7 +1235,8 @@ async function startLive(video, isClosed, onFound) {
           if (native) {
             try { const d = await native.detect(video); if (d && d.length) r = { text: d[0].rawValue, format: d[0].format }; } catch (e) {}
           }
-          if (!r) {
+          if (!r && window.ZXingWASM) r = await wasmDecode(frameData(video, video.videoWidth, video.videoHeight, 1280, cv));
+          if (!r && window.ZXing) {
             const f = frameLum(video, video.videoWidth, video.videoHeight, 1600, cv);
             r = zxDecode(f.lum, f.w, f.h, false);
             if (!r && n % 3 === 2) { const q = rot90(f.lum, f.w, f.h); r = zxDecode(q.lum, q.w, q.h, false); }
@@ -1423,7 +1466,7 @@ async function runExport(kind) {
 
 /* ---------- بدء التشغيل ---------- */
 (function init() {
-  setTimeout(function () { ensureZX().catch(function () {}); }, 2500);
+  setTimeout(function () { ensureWasm(); ensureZX().catch(function () {}); }, 2500);
   S.token = loadTok();
   if (!S.token) { show('login'); return; }
   let cached = null;
