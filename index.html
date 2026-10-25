@@ -83,7 +83,7 @@ canvas.pv{width:100%;border:1px solid var(--bd);border-radius:6px;background:#ff
 
 <script>
 /* الصق هنا رابط Apps Script المنشور (ينتهي بـ /exec) بين علامتي الاقتباس */
-const UI_VERSION = 'v6.1';
+const UI_VERSION = 'v6.2';
 const UI_DATE = '2026-10-25';
 const API_URL = 'https://script.google.com/macros/s/AKfycbxADQOlh3G90s6mgoHq-Wd5HW3cwnboR9s6avWBKuI_g0WO_Sj9uNEJyJAe7y9TexKBZA/exec';
 const INITIAL_ID = (new URLSearchParams(location.search).get('id') || '').replace(/[^A-Za-z0-9\-]/g, '').slice(0, 60);
@@ -269,7 +269,8 @@ views.login = function () {
   $('#app').innerHTML = '<div class="wrap" style="padding-top:48px"><div class="card"><h2 style="margin:0 0 2px">إدارة الأصول الحكومية</h2><p class="sub">مدرسة موسى بن نصير</p>' +
     '<label>اسم الدخول</label><input id="lu" dir="ltr" autocomplete="username" autocapitalize="none">' +
     '<label>رمز الدخول</label><input id="lp" type="password" dir="ltr" autocomplete="current-password" onkeydown="if(event.key===\'Enter\')doLogin()">' +
-    '<div style="height:12px"></div><button class="btn primary" onclick="doLogin()">دخول</button></div></div>';
+    '<div style="height:12px"></div><button class="btn primary" onclick="doLogin()">دخول</button></div>' +
+    '<p class="mut" style="text-align:center;direction:ltr">واجهة ' + UI_VERSION + ' — ' + UI_DATE + '</p></div>';
 };
 async function doLogin() {
   const u = $('#lu').value.trim(), p = $('#lp').value;
